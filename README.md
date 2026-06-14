@@ -42,6 +42,23 @@ licensing). You supply the SDK files once:
    `Driver.zip`→`srcameradriver.inf` → *Install anyway*.
 4. Run `crsdk_server.exe`. The console opens in your browser; the phone LAN URL is printed.
 
+**Driver install — read this.** The SDK reaches the camera over libusb, so Windows must bind
+the camera to Sony's **libusbK** driver instead of the default MTP driver:
+
+- Set the camera to **PC Remote**, *not* MTP. In PC Remote mode the MTP/Mass-Storage USB
+  options grey out — that's expected. Until the driver is swapped the camera shows as a plain
+  **MTP/WPD** device and the server logs `no cameras detected` (the "Sony Camera (Imaging Edge)"
+  webcam device is unrelated).
+- Use **Have Disk → `srcameradriver.inf` → Install anyway**. `pnputil` alone is rejected because
+  Sony's publisher cert isn't trusted; the interactive "Install anyway" is what makes it go
+  through, and **Secure Boot off** lets the kernel driver load.
+- After installing, **unplug and replug the USB** so it rebinds (`libusbK USB Devices / Sony
+  Remote Control Camera` in Device Manager = success).
+- Quit via the UI **Quit button** (graceful). Force-killing leaves the PC Remote session hung →
+  next connect is `ConnectTimeout`; replug the USB to recover.
+- Photos download to the PC only when the camera's **Still Img. Save Dest.** includes PC, and AF
+  won't release with the lens cap on — use **MF** to test.
+
 > Details & troubleshooting: [`docs/WINDOWS-PORT.md`](docs/WINDOWS-PORT.md). Building the
 > Windows app (and a full installer that auto-installs the driver) is covered under
 > *Build → Windows* below.
