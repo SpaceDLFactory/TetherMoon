@@ -36,6 +36,8 @@ use tokio::sync::{broadcast, Mutex};
 use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
 use tower_http::services::ServeDir;
 
+mod autofocus; // SW-AF: 라이브뷰 프레임 선명도 측정
+
 // ── macOS USB 간섭 억제 (ptpcamerad) ────────────────────────────────────
 // launchd가 ~100ms마다 ptpcamerad를 재시작하며 USB PTP 인터페이스를 선점한다.
 // 일회성 kill로는 connect 핸드셰이크(최대 10s) 윈도우를 못 버틴다.
@@ -117,6 +119,7 @@ struct AppState {
     interval_active: Arc<std::sync::atomic::AtomicBool>, // 인터벌 촬영 진행중 (취소 신호 겸용)
     lv_tx: broadcast::Sender<Arc<Vec<u8>>>, // LiveView 프레임 fan-out (다중 클라이언트)
     lv_running: Arc<std::sync::Mutex<bool>>, // LiveView 프로듀서 가동 여부 (시작/종료 race 방지용 락)
+    af_active: Arc<std::sync::atomic::AtomicBool>, // SW-AF 스윕 진행중 (단일 실행 + 취소 신호 겸용)
 }
 
 // ── /api/status DTO ─────────────────────────────────────────────────────
@@ -430,6 +433,157 @@ async fn focus_near_far(
         Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, format!("sdk: {e:?}")),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("task: {e}")),
     }
+}
+
+// ── 소프트웨어 오토포커스 (MF + 컨트라스트 검출 풀스윕) ───────────────────
+// A7C는 절대 초점 위치 API가 없어 NearFar 상대 스텝만 가능 → 스텝을 세면서
+// 윈도우를 풀스윕하고 각 지점 선명도(라플라시안 분산)를 측정, 최고점으로 복귀한다.
+// 선명도 ROI 중심은 사용자가 라이브뷰에서 찍은 정규화 좌표 (x,y).
+
+/// NearFar 1회 구동 (블로킹 SDK 호출을 spawn_blocking).
+async fn af_drive(handle: i64, step: i32) {
+    let _ = tokio::task::spawn_blocking(move || crsdk::control::focus_near_far(handle, step)).await;
+}
+
+/// 한 지점 선명도: stale 프레임 비우고 fresh `frames`장 평균. 라이브뷰 없으면 None.
+async fn af_grab(
+    rx: &mut broadcast::Receiver<Arc<Vec<u8>>>,
+    cx: f64,
+    cy: f64,
+    roi: f64,
+    frames: u32,
+) -> Option<f64> {
+    while rx.try_recv().is_ok() {} // 구동 전 쌓인 오래된 프레임 폐기
+    let mut sum = 0.0;
+    let mut k = 0.0;
+    for _ in 0..frames {
+        let f = match tokio::time::timeout(Duration::from_millis(700), rx.recv()).await {
+            Ok(Ok(f)) => f,
+            _ => break,
+        };
+        if let Ok(Some(m)) =
+            tokio::task::spawn_blocking(move || autofocus::focus_measure(&f[..], cx, cy, roi)).await
+        {
+            sum += m;
+            k += 1.0;
+        }
+    }
+    if k > 0.0 {
+        Some(sum / k)
+    } else {
+        None
+    }
+}
+
+#[derive(Deserialize)]
+struct SwAfReq {
+    x: Option<f64>,         // ROI 중심 정규화(없으면 0.5 중앙)
+    y: Option<f64>,
+    roi: Option<f64>,       // ROI 한 변 비율(기본 0.25)
+    step: Option<i32>,      // NearFar 한 스텝 크기(기본 5)
+    count: Option<u32>,     // 전체 스윕 지점 수(기본 24; 윈도우 = ±count/2 스텝)
+    settle_ms: Option<u64>, // 구동 후 안정 대기(기본 250)
+    frames: Option<u32>,    // 지점당 평균 프레임 수(기본 2)
+}
+
+#[derive(Serialize)]
+struct SwAfResult {
+    best_index: usize,
+    best_score: f64,
+    points: usize,
+    scores: Vec<f64>,
+    x: f64,
+    y: f64,
+}
+
+async fn sw_autofocus(State(s): State<AppState>, Json(b): Json<SwAfReq>) -> Response {
+    use std::sync::atomic::Ordering;
+    let handle = {
+        let g = s.camera.lock().await;
+        match &*g {
+            Some(c) => c.0.device_handle(),
+            None => return (StatusCode::SERVICE_UNAVAILABLE, "not connected").into_response(),
+        }
+    };
+    // 단일 실행 가드
+    if s.af_active
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return (StatusCode::CONFLICT, "autofocus already running").into_response();
+    }
+    let cx = b.x.unwrap_or(0.5);
+    let cy = b.y.unwrap_or(0.5);
+    let roi = b.roi.unwrap_or(0.25);
+    let step = b.step.unwrap_or(5).abs().max(1);
+    let n = b.count.unwrap_or(24).clamp(4, 200);
+    let settle = Duration::from_millis(b.settle_ms.unwrap_or(250));
+    let frames = b.frames.unwrap_or(2).clamp(1, 5);
+    let active = s.af_active.clone();
+    let mut rx = s.lv_tx.subscribe();
+
+    // 라이브뷰 가동 확인: 첫 프레임이 안 오면 중단.
+    if af_grab(&mut rx, cx, cy, roi, 1).await.is_none() {
+        active.store(false, Ordering::SeqCst);
+        return (StatusCode::PRECONDITION_REQUIRED, "live view not running").into_response();
+    }
+
+    // 1) 윈도우 시작(Near 쪽 끝)으로 이동: Near 방향(-)으로 n/2 스텝.
+    for _ in 0..(n / 2) {
+        af_drive(handle, -step).await;
+    }
+    tokio::time::sleep(settle).await;
+
+    // 2) Far(+)로 스윕하며 각 지점 측정.
+    let mut scores: Vec<f64> = Vec::with_capacity(n as usize + 1);
+    let mut best = -1.0f64;
+    let mut best_k = 0usize;
+    let mut cancelled = false;
+    for i in 0..=n as usize {
+        if !active.load(Ordering::SeqCst) {
+            cancelled = true;
+            break;
+        }
+        let sc = af_grab(&mut rx, cx, cy, roi, frames).await.unwrap_or(0.0);
+        if sc > best {
+            best = sc;
+            best_k = i;
+        }
+        scores.push(sc);
+        if i < n as usize {
+            af_drive(handle, step).await;
+            tokio::time::sleep(settle).await;
+        }
+    }
+
+    // 3) 최고점으로 복귀: 현재 위치(스윕 마지막 측정 지점) → Near로 되돌림.
+    let here = scores.len().saturating_sub(1); // 마지막으로 측정한 인덱스
+    let back = here.saturating_sub(best_k) as i32;
+    for _ in 0..back {
+        af_drive(handle, -step).await;
+    }
+
+    active.store(false, Ordering::SeqCst);
+    tracing::info!(
+        "sw-af: best idx {best_k}/{} score {best:.0} (x={cx:.2} y={cy:.2}{})",
+        scores.len(),
+        if cancelled { ", cancelled" } else { "" }
+    );
+    Json(SwAfResult {
+        best_index: best_k,
+        best_score: best,
+        points: scores.len(),
+        scores,
+        x: cx,
+        y: cy,
+    })
+    .into_response()
+}
+
+async fn sw_autofocus_cancel(State(s): State<AppState>) -> impl IntoResponse {
+    s.af_active
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    (StatusCode::OK, "cancel")
 }
 
 #[derive(Deserialize)]
@@ -1308,6 +1462,7 @@ async fn main() {
         interval_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         lv_tx: broadcast::channel::<Arc<Vec<u8>>>(4).0,
         lv_running: Arc::new(std::sync::Mutex::new(false)),
+        af_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
 
     // 자동 (재)연결 루프: 미연결 상태면 3초마다 connect 시도.
@@ -1355,6 +1510,8 @@ async fn main() {
         .route("/api/savepath/browse", post(browse_save_path))
         .route("/api/focus_nearfar", post(focus_near_far))
         .route("/api/focus_nearfar/info", get(focus_nearfar_info))
+        .route("/api/sw_autofocus", post(sw_autofocus))
+        .route("/api/sw_autofocus/cancel", post(sw_autofocus_cancel))
         .route("/api/capabilities", get(capabilities))
         .route("/api/_debug/codes", get(debug_all_codes))
         .route("/api/_debug/enum", get(debug_enum))
