@@ -107,7 +107,8 @@
 - ✅ **LiveView 다중 클라이언트** — 카메라당 **단일 프로듀서**(LiveViewStream 하나)가 16ms fetch → `broadcast`로 fan-out, 각 `/lv`는 구독만(SDK 라이브뷰 접근 1개). 프로듀서는 첫 시청자에 시작(lv_running 락으로 단일 보장), 카메라 해제 시 종료→재연결 후 재시작. 검증: 하드웨어(2·3 클라 동시 각 118~119프레임 동일 수신, producer started 1회). ⚠️ 브라우저 닫혀도 연결 중 상시 가동(broadcast 무손실·비블로킹이라 hyper가 끊긴 Receiver를 즉시 안 드롭→시청자-0 종료 비신뢰 → 상시 가동으로 단순화, idle ~2.5% CPU)
 
 ### 마지막 순위 — WiFi/SSH 연결
-- ❌ **WiFi/SSH 연결** — lib에 연결 인증 경로(`ConnectMode::Wifi`+`get_fingerprint`)는 있으나, ① 카메라 발견이 `EnumCameraObjects` 자동탐색뿐(IP 등록 `CreateCameraObjectInfoEthernetConnection` FFI 미구현) ② A7C의 SDK WiFi 테더링 지원 여부 미검증. 착수 전 자동발견 실측 진단(경로 A/B 분기) 필요
+- ⛔ **WiFi/SSH 연결 — A7C는 CrSDK 미지원 확정(USB 전용).** SDK API Reference `other/compatibility.html#supporting-physical-layer` 표: **ILCE-7C = USB만(Ethernet/Wireless 전부 `-`)**. (참고: Imaging Edge의 Wi-Fi PC Remote와 별개 — CrSDK는 A7C 무선을 막아둠.) 무선 ✓ 바디(ILCE-7CM2/7CR/7M4/ZV-E1/FX3 등)가 있어야 검증 가능 → **멀티바디 트랙(D)으로 보류**.
+- 착수 시 작업량: lib에 SSH 인증 connect 경로(`ConnectMode::Wifi`+`get_fingerprint`)는 **이미 있음**. 남은 건 IP 등록 FFI(`CreateCameraObjectInfoEthernetConnection`) + 네트워크 연결 UI(IP·SSH 비번). 자동발견(`EnumCameraObjects`)이 잡으면 FFI 불필요(경로 A/B는 지원 바디로 실측).
 
 ### 별도 트랙 — 하드웨어 검증 (코딩 아님)
 - 미검증 누적분 실측 필요(`SHUTTER_TEST.md`): 연사·동영상녹화·촬영취소·셔터타입·사일런트·미리보기·피킹·AF포인트·배터리표시
