@@ -98,6 +98,7 @@
 - ✅ **인터벌/타임랩스** — A7C는 내장 인터벌 설정 미노출 → **소프트웨어 인터벌**(`/api/interval {interval_sec,count}` + `/stop`, 백그라운드 루프, 1초 단위 취소). 하드웨어 검증(2장 촬영, 409 중복거부, 정지/재시작). MF 권장, RAW는 간격 ≥10초
 - 🔧 **dropdown 라벨 중복 제거** — fillSelect가 같은 라벨(연속브라켓/싱글브라켓/연속타이머 등 변종)을 1개로 접음. 카메라가 보고하는 변종 도배 해소
 - 🚫 A7C 미지원 확인됨(덤프 대조): RAW압축(0x0131), Creative Look(0x01C5) — 둘 다 카메라가 property 자체를 노출 안 함. SDK에 Creative Style 대체 property 없음. ✅ WB AWB(0) 0-필터 버그 수정: `fillSelect(selWb,...,allowZero=true)`로 현재값이 AWB 아니어도 드롭다운에 노출 (벌브·PP Off와 동일 처리). 검증: 하드웨어(WB allowed에 0 포함 확인)
+- 🔬 **SW-AF(소프트웨어 컨트라스트 검출 AF)** — A7C MF 절대위치 없음 → `focus_near_far` 상대스텝 **풀스윕**(`/api/sw_autofocus {x,y,...}` + `/cancel`)하며 사용자가 찍은 지점 ROI의 **라플라시안 분산**(`autofocus.rs`, 라이브뷰 JPEG 디코드) 측정→최고점 복귀. UI "SW-AF" 버튼=지점 무장→라이브뷰 클릭. 참조: AXIS/OpenCV(중앙ROI 풀스윕)를 상대MF+지점선택으로 포팅. ⚠️ **하드웨어 미검증**(MF+라이브뷰 필요). 남음: coarse→fine/백래시 보정, UI 튜닝 슬라이더, SSE 진행률
 
 ### Tier 3 — 뷰·편의
 - ✅ **조합형 그리드** — 라이브뷰 우상단 ▦ → 메뉴에서 **3분할·소실점(중앙 방사+수평/수직)·대각선(코너 X)** 을 각각 독립 토글(동시 표시 가능). SVG 오버레이, 라이브뷰와 동반 회전. 선은 흰색+검은 외곽(밝은 장면 가시성). (주의: SVG는 CSS `display:none` 기본이라 JS에서 `'block'` 명시 — `''`면 다시 숨겨지는 함정)
