@@ -1141,10 +1141,11 @@
       const r = await fetch('/api/focus_nearfar/info', { cache: 'no-store' });
       if (!r.ok) return;
       const info = await r.json();
-      // 카메라가 주는 step 크기를 한 틱 이동량으로 사용(Range면 values[2]).
+      // NearFar Range = [min, max, step]. values[2]는 granularity(예: A7C=1)라 한 틱으로
+      // 쓰면 이동이 거의 안 보임 → 범위 최대치 기준 가시적 크기(최대 5)를 한 틱으로.
       if (info.is_range && info.values.length >= 3) {
-        const s = Math.abs(info.values[2]) || 0;
-        if (s > 0) nfStep = s;
+        const maxMag = Math.max(...info.values.slice(0, 3).map(v => Math.abs(v)));
+        if (maxMag > 0) nfStep = Math.min(5, maxMag);
       }
       nfFar.disabled = false;
       nfNear.disabled = false;

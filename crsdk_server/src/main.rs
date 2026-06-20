@@ -475,23 +475,73 @@ async fn af_grab(
     }
 }
 
+/// 현재 위치에서 Far(+step)로 n번 이동하며 n+1 지점 측정. (scores, best_index) 반환.
+/// active=false면 즉시 중단(부분 scores). 끝나면 focus는 마지막 측정 지점(far 끝).
+#[allow(clippy::too_many_arguments)]
+async fn af_phase(
+    handle: i64,
+    rx: &mut broadcast::Receiver<Arc<Vec<u8>>>,
+    cx: f64,
+    cy: f64,
+    roi: f64,
+    frames: u32,
+    settle: Duration,
+    step: i32,
+    n: u32,
+    active: &std::sync::atomic::AtomicBool,
+) -> (Vec<f64>, usize) {
+    use std::sync::atomic::Ordering;
+    let mut scores = Vec::with_capacity(n as usize + 1);
+    let mut best = -1.0f64;
+    let mut best_k = 0usize;
+    for i in 0..=n as usize {
+        if !active.load(Ordering::SeqCst) {
+            break;
+        }
+        let sc = af_grab(rx, cx, cy, roi, frames).await.unwrap_or(0.0);
+        if sc > best {
+            best = sc;
+            best_k = i;
+        }
+        scores.push(sc);
+        if i < n as usize {
+            af_drive(handle, step).await;
+            tokio::time::sleep(settle).await;
+        }
+    }
+    (scores, best_k)
+}
+
+/// Near 방향(-)으로 step을 times번 구동 후 settle.
+async fn af_move_near(handle: i64, step: i32, times: usize, settle: Duration) {
+    for _ in 0..times {
+        af_drive(handle, -step.abs()).await;
+    }
+    if times > 0 {
+        tokio::time::sleep(settle).await;
+    }
+}
+
 #[derive(Deserialize)]
 struct SwAfReq {
-    x: Option<f64>,         // ROI 중심 정규화(없으면 0.5 중앙)
+    x: Option<f64>,          // ROI 중심 정규화(없으면 0.5 중앙)
     y: Option<f64>,
-    roi: Option<f64>,       // ROI 한 변 비율(기본 0.25)
-    step: Option<i32>,      // NearFar 한 스텝 크기(기본 5)
-    count: Option<u32>,     // 전체 스윕 지점 수(기본 24; 윈도우 = ±count/2 스텝)
-    settle_ms: Option<u64>, // 구동 후 안정 대기(기본 250)
-    frames: Option<u32>,    // 지점당 평균 프레임 수(기본 2)
+    roi: Option<f64>,        // ROI 한 변 비율(기본 0.25)
+    step: Option<i32>,       // coarse NearFar 스텝(기본 5)
+    count: Option<u32>,      // coarse 스윕 지점 수(기본 24; 윈도우 = ±count/2 스텝)
+    fine_step: Option<i32>,  // fine NearFar 스텝(기본 1=granularity)
+    fine_count: Option<u32>, // fine 스윕 지점 수(기본 8; coarse best 주변 ±fine_count/2)
+    settle_ms: Option<u64>,  // 구동 후 안정 대기(기본 250)
+    frames: Option<u32>,     // 지점당 평균 프레임 수(기본 2)
 }
 
 #[derive(Serialize)]
 struct SwAfResult {
-    best_index: usize,
+    best_index: usize,        // fine 단계 최종 best
     best_score: f64,
-    points: usize,
-    scores: Vec<f64>,
+    points: usize,            // fine 측정 지점 수
+    coarse_scores: Vec<f64>,  // 진단용
+    fine_scores: Vec<f64>,
     x: f64,
     y: f64,
 }
@@ -517,6 +567,8 @@ async fn sw_autofocus(State(s): State<AppState>, Json(b): Json<SwAfReq>) -> Resp
     let roi = b.roi.unwrap_or(0.25);
     let step = b.step.unwrap_or(5).abs().max(1);
     let n = b.count.unwrap_or(24).clamp(4, 200);
+    let fine_step = b.fine_step.unwrap_or(1).abs().clamp(1, step);
+    let fine_n = b.fine_count.unwrap_or(8).clamp(2, 40);
     let settle = Duration::from_millis(b.settle_ms.unwrap_or(250));
     let frames = b.frames.unwrap_or(2).clamp(1, 5);
     let active = s.af_active.clone();
@@ -528,52 +580,59 @@ async fn sw_autofocus(State(s): State<AppState>, Json(b): Json<SwAfReq>) -> Resp
         return (StatusCode::PRECONDITION_REQUIRED, "live view not running").into_response();
     }
 
-    // 1) 윈도우 시작(Near 쪽 끝)으로 이동: Near 방향(-)으로 n/2 스텝.
-    for _ in 0..(n / 2) {
-        af_drive(handle, -step).await;
-    }
-    tokio::time::sleep(settle).await;
+    // ── PHASE 1: coarse — 현재 초점 기준 ±n/2 큰 스텝 윈도우 풀스윕 ──
+    af_move_near(handle, step, (n / 2) as usize, settle).await;
+    let (coarse_scores, ck) =
+        af_phase(handle, &mut rx, cx, cy, roi, frames, settle, step, n, &active).await;
+    // coarse best로 복귀(far 끝 → Near)
+    let coarse_end = coarse_scores.len().saturating_sub(1);
+    af_move_near(handle, step, coarse_end.saturating_sub(ck), settle).await;
 
-    // 2) Far(+)로 스윕하며 각 지점 측정.
-    let mut scores: Vec<f64> = Vec::with_capacity(n as usize + 1);
-    let mut best = -1.0f64;
-    let mut best_k = 0usize;
-    let mut cancelled = false;
-    for i in 0..=n as usize {
-        if !active.load(Ordering::SeqCst) {
-            cancelled = true;
-            break;
+    // ── PHASE 2: fine — coarse best 주변 ±fine_n/2 작은 스텝 ──
+    let mut fine_scores = Vec::new();
+    if active.load(Ordering::SeqCst) {
+        af_move_near(handle, fine_step, (fine_n / 2) as usize, settle).await;
+        let (fs, fk) = af_phase(
+            handle, &mut rx, cx, cy, roi, frames, settle, fine_step, fine_n, &active,
+        )
+        .await;
+        // fine best로 복귀 + 백래시 보정: Near로 (end-fk+B) 갔다 Far로 B → 최종 접근은 Far(스윕과 동일).
+        let backlash = 2usize;
+        let fine_end = fs.len().saturating_sub(1);
+        af_move_near(handle, fine_step, fine_end.saturating_sub(fk) + backlash, settle).await;
+        for _ in 0..backlash {
+            af_drive(handle, fine_step).await;
         }
-        let sc = af_grab(&mut rx, cx, cy, roi, frames).await.unwrap_or(0.0);
-        if sc > best {
-            best = sc;
-            best_k = i;
-        }
-        scores.push(sc);
-        if i < n as usize {
-            af_drive(handle, step).await;
-            tokio::time::sleep(settle).await;
-        }
+        fine_scores = fs;
+        // best_index는 fine 기준
+        let best_index = fk;
+        let best_score = fine_scores.get(fk).copied().unwrap_or(0.0);
+        active.store(false, Ordering::SeqCst);
+        tracing::info!(
+            "sw-af: coarse {ck}/{coarse_end} -> fine best {best_index}/{} score {best_score:.0} (x={cx:.2} y={cy:.2})",
+            fine_end
+        );
+        return Json(SwAfResult {
+            best_index,
+            best_score,
+            points: fine_scores.len(),
+            coarse_scores,
+            fine_scores,
+            x: cx,
+            y: cy,
+        })
+        .into_response();
     }
 
-    // 3) 최고점으로 복귀: 현재 위치(스윕 마지막 측정 지점) → Near로 되돌림.
-    let here = scores.len().saturating_sub(1); // 마지막으로 측정한 인덱스
-    let back = here.saturating_sub(best_k) as i32;
-    for _ in 0..back {
-        af_drive(handle, -step).await;
-    }
-
+    // 취소된 경우: coarse 결과만 반환(이미 coarse best로 복귀됨).
     active.store(false, Ordering::SeqCst);
-    tracing::info!(
-        "sw-af: best idx {best_k}/{} score {best:.0} (x={cx:.2} y={cy:.2}{})",
-        scores.len(),
-        if cancelled { ", cancelled" } else { "" }
-    );
+    tracing::info!("sw-af: cancelled in coarse (best {ck}/{coarse_end})");
     Json(SwAfResult {
-        best_index: best_k,
-        best_score: best,
-        points: scores.len(),
-        scores,
+        best_index: ck,
+        best_score: coarse_scores.get(ck).copied().unwrap_or(0.0),
+        points: coarse_scores.len(),
+        coarse_scores,
+        fine_scores,
         x: cx,
         y: cy,
     })
