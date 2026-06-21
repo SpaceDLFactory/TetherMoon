@@ -1490,11 +1490,11 @@
   };
   lvWrap.addEventListener('click', (e) => {
     if (e.target.closest('button, .grid-menu')) return;     // 오버레이 버튼/그리드 메뉴 클릭은 무시
+    if (swafArming || swafDragging || swafJustHandled) return; // SW-AF는 pointer(드래그)로 처리
     const r = lvWrap.getBoundingClientRect();
     const sx = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
     const sy = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
     if (loupeOn) { const [nx, ny] = unrotateClick(sx, sy, r); lfx = nx; lfy = ny; return; } // 줌: 확대 지점
-    if (swafArming) { swafPick(sx, sy, r); return; }  // SW-AF: 측정 지점 선택
     placeAf(sx, sy);
   });
   document.getElementById('afCenterBtn').addEventListener('click', () => placeAf(0.5, 0.5));
@@ -1523,6 +1523,7 @@
   swafSync();
   const swafContIn = document.getElementById('swafContIn');
   let swafArming = false, swafRunning = false, swafCont = false;
+  let swafDragging = false, swafDragStart = null, swafJustHandled = false;
   const setSwaf = (t) => { swafBtn.textContent = t; };
   const swafReset = () => {
     swafRunning = false; swafCont = false; swafBtn.classList.remove('active');
@@ -1535,17 +1536,24 @@
     if (swafArming) swafRoi.style.display = 'none';   // 재무장 시 이전 박스 제거
     setSwaf(swafArming ? 'Click focus point…' : 'SW-AF (pick point)');
   });
-  const swafPick = async (sx, sy, r) => {
+  // sx,sy = ROI 중심(화면 정규화). roiW/roiH 주면 직사각형 박스, 없으면 슬라이더 ROI(점-선택).
+  const swafPick = async (sx, sy, r, roiW, roiH) => {
     swafArming = false;
     const [nx, ny] = unrotateClick(sx, sy, r);
-    // 측정 ROI 박스 표시(찍은 화면 지점 중심, 슬라이더 ROI 크기) — 무엇이 측정되는지 가시화
+    // 측정 ROI 박스 표시(중심 sx,sy) — 무엇이 측정되는지 가시화
     swafRoi.style.left = (sx*100)+'%'; swafRoi.style.top = (sy*100)+'%';
-    swafSync();   // 박스 크기 = 현재 ROI 슬라이더
+    const cfg = swafCfg();
+    if (roiW != null) {                       // 박스 드래그: roi_w/h 사용
+      swafRoi.style.width = (roiW*100)+'%'; swafRoi.style.height = (roiH*100)+'%';
+      delete cfg.roi; cfg.roi_w = roiW; cfg.roi_h = roiH;
+    } else {
+      swafSync();                             // 점-선택: 박스 크기 = 슬라이더 ROI
+    }
     swafRoi.style.display = '';
     afMarker.style.left = (sx*100)+'%'; afMarker.style.top = (sy*100)+'%'; afMarker.style.display = '';
     swafCont = swafContIn.checked;
     swafRunning = true; swafBtn.classList.add('active');
-    const body = JSON.stringify({ x: nx, y: ny, ...swafCfg() });
+    const body = JSON.stringify({ x: nx, y: ny, ...cfg });
     // 연속 모드: 즉시 started 반환 → 백그라운드 진행, 상태는 af_continuous SSE가 갱신.
     if (swafCont) {
       setSwaf('AF cont… (stop)');
@@ -1569,6 +1577,39 @@
       setTimeout(() => { if (!swafRunning && !swafArming) setSwaf('SW-AF (pick point)'); }, 2500);
     }
   };
+
+  // ── SW-AF 박스 드래그(영역 선택) ─────────────────────────────────────
+  // 무장 상태에서 라이브뷰를 드래그하면 직사각형 ROI, 거의 안 움직이면 점-선택.
+  // (딥러닝 디텍터 바운딩박스를 받을 인터페이스의 토대.)
+  const swafPt = (e) => {
+    const r = lvWrap.getBoundingClientRect();
+    return { x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
+             y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)), r };
+  };
+  lvWrap.addEventListener('pointerdown', (e) => {
+    if (!swafArming || e.target.closest('button, .grid-menu')) return;
+    const p = swafPt(e); swafDragStart = p; swafDragging = true;
+    swafRoi.style.left = (p.x*100)+'%'; swafRoi.style.top = (p.y*100)+'%';
+    swafRoi.style.width = '0%'; swafRoi.style.height = '0%'; swafRoi.style.display = '';
+    lvWrap.setPointerCapture(e.pointerId); e.preventDefault();
+  });
+  lvWrap.addEventListener('pointermove', (e) => {
+    if (!swafDragging) return;
+    const p = swafPt(e), s = swafDragStart;
+    const x0=Math.min(s.x,p.x), x1=Math.max(s.x,p.x), y0=Math.min(s.y,p.y), y1=Math.max(s.y,p.y);
+    swafRoi.style.left=((x0+x1)/2*100)+'%'; swafRoi.style.top=((y0+y1)/2*100)+'%';
+    swafRoi.style.width=((x1-x0)*100)+'%'; swafRoi.style.height=((y1-y0)*100)+'%';
+  });
+  lvWrap.addEventListener('pointerup', (e) => {
+    if (!swafDragging) return;
+    swafDragging = false; swafJustHandled = true;
+    setTimeout(() => { swafJustHandled = false; }, 50);   // 직후 click 무시
+    const p = swafPt(e), s = swafDragStart;
+    const x0=Math.min(s.x,p.x), x1=Math.max(s.x,p.x), y0=Math.min(s.y,p.y), y1=Math.max(s.y,p.y);
+    const w=x1-x0, h=y1-y0, bx=(x0+x1)/2, by=(y0+y1)/2;
+    if (w < 0.03 || h < 0.03) swafPick(bx, by, s.r);                     // 거의 안 움직임 → 점-선택
+    else swafPick(bx, by, s.r, Math.min(1, w), Math.min(1, h));          // 박스
+  });
 
   // ── AF D-pad 너지 + 방향키 (영역 미세 이동) ──────────────────────────
   const AF_NUDGE = 0.04;                       // 한 스텝당 화면 비율

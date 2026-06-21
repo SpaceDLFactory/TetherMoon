@@ -451,7 +451,8 @@ async fn af_grab(
     rx: &mut broadcast::Receiver<Arc<Vec<u8>>>,
     cx: f64,
     cy: f64,
-    roi: f64,
+    roi_w: f64,
+    roi_h: f64,
     frames: u32,
 ) -> Option<f64> {
     while rx.try_recv().is_ok() {} // 구동 전 쌓인 오래된 프레임 폐기
@@ -462,8 +463,10 @@ async fn af_grab(
             Ok(Ok(f)) => f,
             _ => break,
         };
-        if let Ok(Some(m)) =
-            tokio::task::spawn_blocking(move || autofocus::focus_measure(&f[..], cx, cy, roi)).await
+        if let Ok(Some(m)) = tokio::task::spawn_blocking(move || {
+            autofocus::focus_measure(&f[..], cx, cy, roi_w, roi_h)
+        })
+        .await
         {
             sum += m;
             k += 1.0;
@@ -484,7 +487,8 @@ async fn af_phase(
     rx: &mut broadcast::Receiver<Arc<Vec<u8>>>,
     cx: f64,
     cy: f64,
-    roi: f64,
+    roi_w: f64,
+    roi_h: f64,
     frames: u32,
     settle: Duration,
     step: i32,
@@ -501,7 +505,7 @@ async fn af_phase(
         if !active.load(Ordering::SeqCst) {
             break;
         }
-        let sc = af_grab(rx, cx, cy, roi, frames).await.unwrap_or(0.0);
+        let sc = af_grab(rx, cx, cy, roi_w, roi_h, frames).await.unwrap_or(0.0);
         if sc > best {
             best = sc;
             best_k = i;
@@ -533,7 +537,9 @@ async fn af_move_near(handle: i64, step: i32, times: usize, settle: Duration) {
 struct SwAfReq {
     x: Option<f64>,          // ROI 중심 정규화(없으면 0.5 중앙)
     y: Option<f64>,
-    roi: Option<f64>,        // ROI 한 변 비율(기본 0.25)
+    roi: Option<f64>,        // ROI 한 변 비율(기본 0.25; 정사각형 점-선택)
+    roi_w: Option<f64>,      // ROI 가로 비율(직사각형 박스 — 없으면 roi)
+    roi_h: Option<f64>,      // ROI 세로 비율(직사각형 박스 — 없으면 roi)
     step: Option<i32>,       // coarse NearFar 스텝(기본 5)
     count: Option<u32>,      // coarse 스윕 지점 수(기본 24; 윈도우 = ±count/2 스텝)
     fine_step: Option<i32>,  // fine NearFar 스텝(기본 1=granularity)
@@ -559,7 +565,8 @@ struct SwAfResult {
 struct SwAfParams {
     cx: f64,
     cy: f64,
-    roi: f64,
+    roi_w: f64,
+    roi_h: f64,
     step: i32,
     n: u32,
     fine_step: i32,
@@ -574,7 +581,8 @@ impl SwAfParams {
         Self {
             cx: b.x.unwrap_or(0.5),
             cy: b.y.unwrap_or(0.5),
-            roi: b.roi.unwrap_or(0.25),
+            roi_w: b.roi_w.or(b.roi).unwrap_or(0.25),
+            roi_h: b.roi_h.or(b.roi).unwrap_or(0.25),
             step,
             n: b.count.unwrap_or(24).clamp(4, 200),
             fine_step: b.fine_step.unwrap_or(1).abs().clamp(1, step),
@@ -598,7 +606,7 @@ async fn swaf_lock(
     // PHASE 1 coarse
     af_move_near(handle, p.step, (p.n / 2) as usize, p.settle).await;
     let (coarse_scores, ck) = af_phase(
-        handle, rx, p.cx, p.cy, p.roi, p.frames, p.settle, p.step, p.n, active, events, "coarse",
+        handle, rx, p.cx, p.cy, p.roi_w, p.roi_h, p.frames, p.settle, p.step, p.n, active, events, "coarse",
     )
     .await;
     let coarse_end = coarse_scores.len().saturating_sub(1);
@@ -610,7 +618,7 @@ async fn swaf_lock(
     // PHASE 2 fine
     af_move_near(handle, p.fine_step, (p.fine_n / 2) as usize, p.settle).await;
     let (fine_scores, fk) = af_phase(
-        handle, rx, p.cx, p.cy, p.roi, p.frames, p.settle, p.fine_step, p.fine_n, active, events,
+        handle, rx, p.cx, p.cy, p.roi_w, p.roi_h, p.frames, p.settle, p.fine_step, p.fine_n, active, events,
         "fine",
     )
     .await;
@@ -647,7 +655,7 @@ async fn sw_autofocus(State(s): State<AppState>, Json(b): Json<SwAfReq>) -> Resp
     let mut rx = s.lv_tx.subscribe();
 
     // 라이브뷰 가동 확인: 첫 프레임이 안 오면 중단.
-    if af_grab(&mut rx, p.cx, p.cy, p.roi, 1).await.is_none() {
+    if af_grab(&mut rx, p.cx, p.cy, p.roi_w, p.roi_h, 1).await.is_none() {
         active.store(false, Ordering::SeqCst);
         return (StatusCode::PRECONDITION_REQUIRED, "live view not running").into_response();
     }
@@ -707,7 +715,7 @@ async fn sw_autofocus_continuous(State(s): State<AppState>, Json(b): Json<SwAfRe
 
     tokio::spawn(async move {
         let mut rx = lv_tx.subscribe();
-        if af_grab(&mut rx, p.cx, p.cy, p.roi, 1).await.is_none() {
+        if af_grab(&mut rx, p.cx, p.cy, p.roi_w, p.roi_h, 1).await.is_none() {
             let _ = events.send(
                 r#"{"type":"af_continuous","state":"error","reason":"no_liveview"}"#.to_string(),
             );
@@ -725,7 +733,7 @@ async fn sw_autofocus_continuous(State(s): State<AppState>, Json(b): Json<SwAfRe
             if !active.load(Ordering::SeqCst) {
                 break;
             }
-            let cur = af_grab(&mut rx, p.cx, p.cy, p.roi, p.frames)
+            let cur = af_grab(&mut rx, p.cx, p.cy, p.roi_w, p.roi_h, p.frames)
                 .await
                 .unwrap_or(0.0);
             if baseline > 0.0 && cur < baseline * threshold {

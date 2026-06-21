@@ -105,7 +105,8 @@
 - 🔧 **dropdown 라벨 중복 제거** — fillSelect가 같은 라벨(연속브라켓/싱글브라켓/연속타이머 등 변종)을 1개로 접음. 카메라가 보고하는 변종 도배 해소
 - 🚫 A7C 미지원 확인됨(덤프 대조): RAW압축(0x0131), Creative Look(0x01C5) — 둘 다 카메라가 property 자체를 노출 안 함. SDK에 Creative Style 대체 property 없음. ✅ WB AWB(0) 0-필터 버그 수정: `fillSelect(selWb,...,allowZero=true)`로 현재값이 AWB 아니어도 드롭다운에 노출 (벌브·PP Off와 동일 처리). 검증: 하드웨어(WB allowed에 0 포함 확인)
 - ✅ **SW-AF(소프트웨어 컨트라스트 검출 AF)** — A7C MF 절대위치 없음 → `focus_near_far` 상대스텝 스윕(`/api/sw_autofocus {x,y,...}` + `/cancel`)하며 사용자가 찍은 지점 ROI의 **라플라시안 분산**(`autofocus.rs`, 라이브뷰 JPEG 디코드) 측정. **coarse→fine 2단계**(큰 스텝 윈도우 풀스윕→피크 구간 fine 미세탐색)+**백래시 보정**(최종 접근 한 방향). UI "SW-AF" 버튼=지점 무장→라이브뷰 클릭. **하드웨어 검증 완료**(A7C/Mac): coarse 피크 baseline 대비 ~26배, fine이 정점 더 정확히 refine(148→158). 참조: AXIS/OpenCV(중앙ROI)를 상대MF+지점선택으로 포팅. **ROI 박스 오버레이**(찍은 지점에 측정영역 점선) + **튜닝 슬라이더**(ROI/step/count/settle, 접이식) + **SSE 진행률**(스윕 중 `{type:af_progress,phase,i,n,score}`를 `/events`로 흘려 버튼에 `AF coarse 3/24` 실시간 표시) 완료. 루트(`/`)는 `/web/index.html`로 303 리다이렉트. **연속 AF**(continuous, 체크박스): 초기 합초 후 ROI 선명도 모니터→baseline 대비 threshold(기본 0.7) 미만이면 재합초, SSE `af_continuous`(locked/hold/refocus/stopped). **하드웨어 검증 완료**(A7C/Mac): locked→hold(모니터 루프)→refocus(재합초 swaf_lock 호출)→locked→stopped 전이 전부 확인. 추후 비전: 박스 선택→딥러닝 디텍터→트래킹 AF의 토대.
-  - (검증 교훈: 라이브뷰 측정값이 0이면 캡/완전균일, 5~6은 저조도 노이즈 플로어 — 둘 다 장면 문제이지 측정 버그 아님. JPEG 1024×680 RGB 디코드 정상 확인)
+  - (검증 교훈: 라이브뷰 측정값이 0이면 캡/완전균일, 5~6은 저조도 노이즈 플로어 — 둘 다 장면 문제이지 측정 버그 아님. JPEG 1024×680 RGB 디코드 정상 확인. 프레임 mean_luma<5면 캡/암흑)
+- 🔬 **직사각형 ROI(박스 드래그)** — `focus_measure`를 roi_w/roi_h로 일반화(정사각형은 roi_w=roi_h 호환). UI: 무장 후 라이브뷰 **드래그=박스 ROI**, 거의 안 움직이면 점-선택. 딥러닝 디텍터 바운딩박스(#4)를 받을 인터페이스 토대. 측정 경로 동작 확인(API roi_w/h 수용). ⏳ 피크·UI 드래그 시각 검증은 조명 있는 장면에서(현재 캡/암흑 mean_luma 2.7)
 - 🔧 **Near/Far 버튼 이동량 수정** — `focus_nearfar/info` Range=[min,max,**step granularity**]인데 UI가 granularity(A7C=1)를 한 틱 이동량으로 써서 ±1=거의 안 움직였음 → `min(5, range최대치)`로 가시적 이동. 하드웨어 검증(A7C step ±5 이동 확인)
 
 ### Tier 3 — 뷰·편의

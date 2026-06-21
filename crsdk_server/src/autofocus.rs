@@ -7,8 +7,9 @@
 // 측정값 = ROI 내부 3x3 라플라시안 응답의 분산(= OpenCV stddev^2). 합초일수록 큼.
 
 /// 라이브뷰 JPEG 한 장에서 (cx,cy) 중심 ROI의 라플라시안 분산을 계산.
-/// cx,cy,roi_frac 는 0..1 정규화. 디코드/측정 실패 시 None.
-pub fn focus_measure(jpeg: &[u8], cx: f64, cy: f64, roi_frac: f64) -> Option<f64> {
+/// cx,cy,roi_w,roi_h 는 0..1 정규화(roi_w/h = ROI 가로/세로 비율 — 직사각형 박스 지원).
+/// 디코드/측정 실패 시 None.
+pub fn focus_measure(jpeg: &[u8], cx: f64, cy: f64, roi_w: f64, roi_h: f64) -> Option<f64> {
     let mut dec = jpeg_decoder::Decoder::new(std::io::Cursor::new(jpeg));
     let px = dec.decode().ok()?;
     let info = dec.info()?;
@@ -25,11 +26,11 @@ pub fn focus_measure(jpeg: &[u8], cx: f64, cy: f64, roi_frac: f64) -> Option<f64
         return None;
     }
 
-    // ROI 박스 (중심 cx,cy, 한 변 roi_frac). 경계 클램프.
+    // ROI 박스 (중심 cx,cy, 가로 roi_w·세로 roi_h). 경계 클램프.
     let cxp = (cx.clamp(0.0, 1.0) * w as f64) as isize;
     let cyp = (cy.clamp(0.0, 1.0) * h as f64) as isize;
-    let half_w = ((roi_frac.clamp(0.02, 1.0) * w as f64) / 2.0).max(2.0) as isize;
-    let half_h = ((roi_frac.clamp(0.02, 1.0) * h as f64) / 2.0).max(2.0) as isize;
+    let half_w = ((roi_w.clamp(0.02, 1.0) * w as f64) / 2.0).max(2.0) as isize;
+    let half_h = ((roi_h.clamp(0.02, 1.0) * h as f64) / 2.0).max(2.0) as isize;
     // 라플라시안은 이웃을 보므로 안쪽 1px 여유.
     let x0 = (cxp - half_w).clamp(1, w as isize - 2) as usize;
     let x1 = (cxp + half_w).clamp(1, w as isize - 2) as usize;
