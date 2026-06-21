@@ -1046,7 +1046,15 @@ async fn last_image(State(s): State<AppState>) -> Response {
     match tokio::fs::read(&path).await {
         Ok(bytes) => {
             let lp = path.to_lowercase();
-            let ct = if lp.ends_with(".heif") || lp.ends_with(".heic") { "image/heif" } else { "image/jpeg" };
+            // 실제 확장자에 맞는 content-type(RAW를 image/jpeg로 라벨하던 버그 수정 — 브라우저가
+            // ARW를 JPEG로 못 그려 깨짐). RAW/미지원은 octet-stream → UI onerror로 스킵.
+            let ct = if lp.ends_with(".heif") || lp.ends_with(".heic") {
+                "image/heif"
+            } else if lp.ends_with(".jpg") || lp.ends_with(".jpeg") {
+                "image/jpeg"
+            } else {
+                "application/octet-stream" // .arw 등 RAW
+            };
             ([(header::CONTENT_TYPE, ct)], bytes).into_response()
         }
         Err(_) => (StatusCode::NOT_FOUND, "read fail").into_response(),

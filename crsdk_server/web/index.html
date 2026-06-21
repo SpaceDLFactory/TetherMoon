@@ -1248,7 +1248,12 @@
   cancelBtn.addEventListener('click', async () => {
     try {
       const r = await fetch('/api/cancel', { method: 'POST' });
-      if (!r.ok) console.warn('cancel', await r.text());
+      if (!r.ok) {
+        const msg = await r.text();
+        console.warn('cancel', msg);
+        // A7C는 standalone CancelShooting 미지원(CrError_Api 0x8401) → 버튼 숨김.
+        if (/8401/.test(msg)) cancelBtn.style.display = 'none';
+      }
     } catch (e) { console.warn('cancel', e); }
   });
 
