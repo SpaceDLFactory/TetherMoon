@@ -490,6 +490,8 @@ async fn af_phase(
     step: i32,
     n: u32,
     active: &std::sync::atomic::AtomicBool,
+    events: &broadcast::Sender<String>,
+    phase: &str,
 ) -> (Vec<f64>, usize) {
     use std::sync::atomic::Ordering;
     let mut scores = Vec::with_capacity(n as usize + 1);
@@ -505,6 +507,10 @@ async fn af_phase(
             best_k = i;
         }
         scores.push(sc);
+        // 진행률을 SSE로 흘려 UI가 실시간 표시.
+        let _ = events.send(format!(
+            r#"{{"type":"af_progress","phase":"{phase}","i":{i},"n":{n},"score":{sc:.0}}}"#
+        ));
         if i < n as usize {
             af_drive(handle, step).await;
             tokio::time::sleep(settle).await;
@@ -573,6 +579,7 @@ async fn sw_autofocus(State(s): State<AppState>, Json(b): Json<SwAfReq>) -> Resp
     let settle = Duration::from_millis(b.settle_ms.unwrap_or(250));
     let frames = b.frames.unwrap_or(2).clamp(1, 5);
     let active = s.af_active.clone();
+    let events = s.events_tx.clone();
     let mut rx = s.lv_tx.subscribe();
 
     // 라이브뷰 가동 확인: 첫 프레임이 안 오면 중단.
@@ -584,7 +591,8 @@ async fn sw_autofocus(State(s): State<AppState>, Json(b): Json<SwAfReq>) -> Resp
     // ── PHASE 1: coarse — 현재 초점 기준 ±n/2 큰 스텝 윈도우 풀스윕 ──
     af_move_near(handle, step, (n / 2) as usize, settle).await;
     let (coarse_scores, ck) =
-        af_phase(handle, &mut rx, cx, cy, roi, frames, settle, step, n, &active).await;
+        af_phase(handle, &mut rx, cx, cy, roi, frames, settle, step, n, &active, &events, "coarse")
+            .await;
     // coarse best로 복귀(far 끝 → Near)
     let coarse_end = coarse_scores.len().saturating_sub(1);
     af_move_near(handle, step, coarse_end.saturating_sub(ck), settle).await;
@@ -594,7 +602,8 @@ async fn sw_autofocus(State(s): State<AppState>, Json(b): Json<SwAfReq>) -> Resp
     if active.load(Ordering::SeqCst) {
         af_move_near(handle, fine_step, (fine_n / 2) as usize, settle).await;
         let (fs, fk) = af_phase(
-            handle, &mut rx, cx, cy, roi, frames, settle, fine_step, fine_n, &active,
+            handle, &mut rx, cx, cy, roi, frames, settle, fine_step, fine_n, &active, &events,
+            "fine",
         )
         .await;
         // fine best로 복귀 + 백래시 보정: Near로 (end-fk+B) 갔다 Far로 B → 최종 접근은 Far(스윕과 동일).

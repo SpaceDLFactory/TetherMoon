@@ -101,6 +101,28 @@ AppState {
         → PC저장 시 SDK 다운로드 → OnCompleteDownload → SSE → "저장됨" 토스트
 ```
 
+## 6.1 소프트웨어 AF (SW-AF) — 컨트라스트 검출
+
+A7C는 **절대 초점 위치 API가 없다**(`focus_near_far`는 부호=방향·크기=속도의 상대 너지뿐).
+그래서 컨트라스트 검출 AF를 직접 구현한다. 코드: `crsdk_server/src/autofocus.rs`(순수 측정)
++ `main.rs::sw_autofocus`(스윕 오케스트레이션). 참조 알고리즘(AXIS/OpenCV의 중앙ROI
+라플라시안 분산)을 **상대 MF 구동 + 사용자 지점 선택**으로 포팅.
+
+```
+POST /api/sw_autofocus {x,y,roi,step,count,fine_step,fine_count,settle_ms,frames}
+  └ lv_tx 구독으로 라이브뷰 JPEG 프레임 획득(별도 LiveViewStream 안 만듦 — 단일 프로듀서 재사용)
+  └ 측정: jpeg-decoder로 디코드 → (x,y) 정규화 중심 ROI → 4-이웃 라플라시안 응답의 분산
+  PHASE 1 coarse: Near n/2 이동 → Far로 n 스텝 풀스윕(지점마다 측정) → 피크 인덱스
+  PHASE 2 fine  : coarse best 복귀 → 작은 스텝으로 ±fine_n/2 미세 스윕 → 정점
+  복귀: 백래시 보정 — 최종 접근을 한 방향(Far)으로 통일(overshoot 후 되돌림)
+  진행률: 지점마다 {type:af_progress,phase,i,n,score}를 events_tx로 → /events SSE → UI
+  취소: af_active(AtomicBool) — /api/sw_autofocus/cancel 가 false 저장, 루프가 감지
+```
+
+UI(`web/index.html`): "SW-AF" 버튼이 지점선택을 무장 → 라이브뷰 클릭(미회전 좌표로 변환,
+탭-투-포커스와 공유) → 측정 ROI를 점선 박스로 표시 + 튜닝 슬라이더(ROI/step/count/settle).
+한계: 상대 스텝이라 백래시·해상도 오차 잔존(coarse→fine로 완화). 라이브뷰+MF 필요.
+
 ## 7. RAII / 안전성 불변식
 
 - **Drop 체인**(Camera): deactivate_callback → disconnect → release_device → destroy_callback

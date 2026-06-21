@@ -1333,6 +1333,9 @@
       case 'error':
         toast(`${t('toast.sdkerr')} 0x${(ev.code >>> 0).toString(16)}`, 'err');
         break;
+      case 'af_progress':            // SW-AF 스윕 진행률(서버가 지점마다 emit)
+        if (swafRunning) setSwaf(`AF ${ev.phase} ${ev.i}/${ev.n}`);
+        break;
       // warning / lv_property_changed 등은 조용히 무시
     }
   };
