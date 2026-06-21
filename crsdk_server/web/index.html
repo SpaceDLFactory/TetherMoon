@@ -102,6 +102,9 @@
     border: 1.5px dashed #ffcc33; box-shadow: 0 0 0 1px rgba(0,0,0,0.6);
     pointer-events: none; display: none; z-index: 5;
   }
+  .swaf-cfg { margin-top: 6px; font-size: 12px; }
+  .swaf-cfg summary { cursor: pointer; color: var(--fg-mute); padding: 2px 0; user-select: none; }
+  .swaf-cfg .nf-slider { margin-top: 6px; }
   .lv-rotate, .lv-grid, .lv-zoom {
     position: absolute; top: 8px; z-index: 6;
     width: 34px; height: 34px; border-radius: 6px;
@@ -541,6 +544,21 @@
       <div class="btn-row">
         <button class="btn" id="swafBtn" type="button" data-i18n="btn.swaf">SW-AF (pick point)</button>
       </div>
+      <details class="swaf-cfg">
+        <summary data-i18n="swaf.tune">SW-AF tuning</summary>
+        <div class="nf-slider" style="grid-template-columns:auto 1fr auto;">
+          <span class="k">ROI</span><input type="range" id="swafRoiIn" min="0.1" max="0.5" step="0.05" value="0.25"><span class="nf-val" id="swafRoiV">0.25</span>
+        </div>
+        <div class="nf-slider" style="grid-template-columns:auto 1fr auto;">
+          <span class="k">Step</span><input type="range" id="swafStepIn" min="1" max="7" step="1" value="5"><span class="nf-val" id="swafStepV">5</span>
+        </div>
+        <div class="nf-slider" style="grid-template-columns:auto 1fr auto;">
+          <span class="k">Count</span><input type="range" id="swafCountIn" min="8" max="40" step="2" value="24"><span class="nf-val" id="swafCountV">24</span>
+        </div>
+        <div class="nf-slider" style="grid-template-columns:auto 1fr auto;">
+          <span class="k">Settle</span><input type="range" id="swafSettleIn" min="100" max="500" step="50" value="250"><span class="nf-val" id="swafSettleV">250</span>
+        </div>
+      </details>
       <div class="btn-row" style="grid-template-columns:1fr 1fr;">
         <button class="btn" id="peakBtn" type="button" data-i18n="btn.peakoff">Peaking OFF</button>
         <button class="btn" id="afCenterBtn" type="button" data-i18n="btn.afcenter">AF center</button>
@@ -623,7 +641,7 @@
       'hint.bulb':'Sets the shutter to BULB for an N-second exposure (Manual mode required). For exposures longer than 30s.',
       'hint.interval':'Software interval. For RAW use interval ≥10s (download ~8s). MF recommended.',
       'hint.afpoint':'Tap the live view to focus; nudge with the D-pad / arrow keys.',
-      'ph.savepath':'PC save folder path','ph.prefix':'Filename prefix (e.g. SHOOT)','btn.browse':'Browse…','btn.swaf':'SW-AF (pick point)',
+      'ph.savepath':'PC save folder path','ph.prefix':'Filename prefix (e.g. SHOOT)','btn.browse':'Browse…','btn.swaf':'SW-AF (pick point)','swaf.tune':'SW-AF tuning',
       'status.reconnect':'· click CAPTURE → retry connect',
       'dyn.exposing':'Exposing','dyn.bulbcaptured':'● BULB CAPTURED','dyn.interval':'Interval','dyn.stop':'Stop',
       'toast.saved':'Saved','toast.disconnected':'Camera disconnected','toast.sdkerr':'SDK error',
@@ -646,7 +664,7 @@
       'hint.bulb':'셔터를 BULB로 바꿔 N초 노출 (Manual 모드 필요). 30초 초과 장노출용',
       'hint.interval':'소프트웨어 인터벌. RAW는 간격 ≥10초 권장(다운로드 ~8s). 초점은 MF 권장',
       'hint.afpoint':'라이브뷰를 탭해서 포커스; D-pad·방향키로 미세 이동.',
-      'ph.savepath':'PC 저장 폴더 경로','ph.prefix':'파일명 접두사 (예: SHOOT)','btn.browse':'찾아보기','btn.swaf':'SW-AF (지점 선택)',
+      'ph.savepath':'PC 저장 폴더 경로','ph.prefix':'파일명 접두사 (예: SHOOT)','btn.browse':'찾아보기','btn.swaf':'SW-AF (지점 선택)','swaf.tune':'SW-AF 튜닝',
       'status.reconnect':'· click CAPTURE → /api/connect 재시도',
       'dyn.exposing':'노출중','dyn.bulbcaptured':'● 벌브 촬영','dyn.interval':'인터벌','dyn.stop':'정지',
       'toast.saved':'저장됨','toast.disconnected':'카메라 연결 끊김','toast.sdkerr':'SDK 오류',
@@ -669,7 +687,7 @@
       'hint.bulb':'シャッターを BULB にして N 秒露光（Manual モード必須）。30 秒超の長秒露光用。',
       'hint.interval':'ソフトウェアインターバル。RAW は間隔 ≥10 秒推奨（ダウンロード約 8 秒）。ピントは MF 推奨。',
       'hint.afpoint':'ライブビューをタップでフォーカス; D-pad・矢印キーで微調整。',
-      'ph.savepath':'PC 保存フォルダのパス','ph.prefix':'ファイル名プレフィックス（例: SHOOT）','btn.browse':'参照…','btn.swaf':'SW-AF (位置選択)',
+      'ph.savepath':'PC 保存フォルダのパス','ph.prefix':'ファイル名プレフィックス（例: SHOOT）','btn.browse':'参照…','btn.swaf':'SW-AF (位置選択)','swaf.tune':'SW-AF 調整',
       'status.reconnect':'· CAPTURE をクリック → 再接続',
       'dyn.exposing':'露出中','dyn.bulbcaptured':'● バルブ撮影','dyn.interval':'インターバル','dyn.stop':'停止',
       'toast.saved':'保存','toast.disconnected':'カメラ切断','toast.sdkerr':'SDK エラー',
@@ -1472,7 +1490,23 @@
   // 선명도(라플라시안 분산)를 측정해 최고점으로 복귀. 실행 중 버튼 = 취소.
   const swafBtn = document.getElementById('swafBtn');
   const swafRoi = document.getElementById('swafRoi');
-  const SWAF_ROI = 0.25;   // 측정 ROI 한 변 비율(서버 기본과 일치 — 박스/측정 동기)
+  // 튜닝 슬라이더(ROI/coarse step/count/settle). 값은 swafPick에서 전송, ROI는 박스에도 반영.
+  const swafRoiIn = document.getElementById('swafRoiIn'), swafRoiV = document.getElementById('swafRoiV');
+  const swafStepIn = document.getElementById('swafStepIn'), swafStepV = document.getElementById('swafStepV');
+  const swafCountIn = document.getElementById('swafCountIn'), swafCountV = document.getElementById('swafCountV');
+  const swafSettleIn = document.getElementById('swafSettleIn'), swafSettleV = document.getElementById('swafSettleV');
+  const swafCfg = () => ({
+    roi: parseFloat(swafRoiIn.value), step: parseInt(swafStepIn.value, 10),
+    count: parseInt(swafCountIn.value, 10), settle_ms: parseInt(swafSettleIn.value, 10),
+  });
+  const swafSync = () => {
+    swafRoiV.textContent = swafRoiIn.value; swafStepV.textContent = swafStepIn.value;
+    swafCountV.textContent = swafCountIn.value; swafSettleV.textContent = swafSettleIn.value;
+    const f = (parseFloat(swafRoiIn.value) * 100) + '%';
+    swafRoi.style.width = f; swafRoi.style.height = f;   // ROI 박스 실시간 크기
+  };
+  [swafRoiIn, swafStepIn, swafCountIn, swafSettleIn].forEach(el => el.addEventListener('input', swafSync));
+  swafSync();
   let swafArming = false, swafRunning = false;
   const setSwaf = (t) => { swafBtn.textContent = t; };
   swafBtn.addEventListener('click', () => {
@@ -1485,16 +1519,16 @@
   const swafPick = async (sx, sy, r) => {
     swafArming = false;
     const [nx, ny] = unrotateClick(sx, sy, r);
-    // 측정 ROI 박스 표시(찍은 화면 지점 중심, SWAF_ROI 크기) — 무엇이 측정되는지 가시화
+    // 측정 ROI 박스 표시(찍은 화면 지점 중심, 슬라이더 ROI 크기) — 무엇이 측정되는지 가시화
     swafRoi.style.left = (sx*100)+'%'; swafRoi.style.top = (sy*100)+'%';
-    swafRoi.style.width = (SWAF_ROI*100)+'%'; swafRoi.style.height = (SWAF_ROI*100)+'%';
+    swafSync();   // 박스 크기 = 현재 ROI 슬라이더
     swafRoi.style.display = '';
     afMarker.style.left = (sx*100)+'%'; afMarker.style.top = (sy*100)+'%'; afMarker.style.display = '';
     swafRunning = true; swafBtn.classList.add('active'); setSwaf('AF… (cancel)');
     try {
       const res = await fetch('/api/sw_autofocus', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ x: nx, y: ny, roi: SWAF_ROI }),
+        body: JSON.stringify({ x: nx, y: ny, ...swafCfg() }),
       });
       if (res.ok) { const d = await res.json(); setSwaf(`SW-AF ✓ ${d.best_index}/${d.points-1}`); toast('SW-AF 완료', 'ok'); }
       else { setSwaf('SW-AF (pick point)'); toast('SW-AF: ' + (await res.text()), 'err'); }

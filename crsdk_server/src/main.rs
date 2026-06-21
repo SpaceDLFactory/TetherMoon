@@ -22,7 +22,7 @@ use axum::{
     http::{header, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
-        IntoResponse, Json, Response,
+        IntoResponse, Json, Redirect, Response,
     },
     routing::{get, post},
     Router,
@@ -137,8 +137,9 @@ enum Status {
 
 // ── Handlers ────────────────────────────────────────────────────────────
 
-async fn root() -> &'static str {
-    "crsdk_server — alive"
+// 루트(IP:포트만 입력) → 웹 UI로 리다이렉트.
+async fn root() -> Redirect {
+    Redirect::to("/web/index.html")
 }
 
 async fn status(State(s): State<AppState>) -> Json<Status> {
