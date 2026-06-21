@@ -615,11 +615,15 @@ async fn swaf_lock(
         let bs = coarse_scores.get(ck).copied().unwrap_or(0.0);
         return (coarse_scores, ck, Vec::new(), 0, bs);
     }
-    // PHASE 2 fine
-    af_move_near(handle, p.fine_step, (p.fine_n / 2) as usize, p.settle).await;
+    // PHASE 2 fine — fine 범위가 coarse 한 격자(±step)를 fine_step 단위로 덮도록 보장.
+    // (안 그러면 coarse 정점이 fine 범위 밖이라 fine이 더 나쁜 위치에 멈춤; 실측 발견)
+    let fine_n = p
+        .fine_n
+        .max(2 * (p.step as u32).div_ceil(p.fine_step.max(1) as u32) + 2);
+    af_move_near(handle, p.fine_step, (fine_n / 2) as usize, p.settle).await;
     let (fine_scores, fk) = af_phase(
-        handle, rx, p.cx, p.cy, p.roi_w, p.roi_h, p.frames, p.settle, p.fine_step, p.fine_n, active, events,
-        "fine",
+        handle, rx, p.cx, p.cy, p.roi_w, p.roi_h, p.frames, p.settle, p.fine_step, fine_n, active,
+        events, "fine",
     )
     .await;
     // fine best로 복귀 + 백래시 보정(최종 접근 한 방향=Far)
