@@ -76,7 +76,11 @@
 ## 4. 알려진 이슈 / 미검증
 
 - ✅ ~~AF 포인트 좌표 인코딩 추정~~ → 해결: device property 0x0121, x:0~639/y:0~479 (5절 참조)
-- ⚠️ **하드웨어 미검증 누적**: 연사·동영상·촬영취소·셔터타입·사일런트·미리보기·피킹·AF포인트·배터리표시 (`SHUTTER_TEST.md` 체크리스트)
+- ✅ **하드웨어 검증 통과(2026-06, A7C/Mac)**: 배터리(100)·남은컷(2565)·파일포맷·조리개·focus_indication readout; **연사**(press-hold 1.5s→4프레임 PC다운로드, drive 연속); **동영상**(start→rec_state 1, stop→0, ~2-3s 지연); **AF포인트**(afframe 유효 박스); **미리보기** last_image(파일 반환)
+- ⚠️ **촬영취소(`/api/cancel` = CancelShooting)**: A7C가 `CrError_Api`(0x8401, invalid-called) 일관 반환 — idle/연사중 모두. standalone 취소는 A7C 미지원/부적용 추정. press-hold는 `shutter/up`으로 정지하므로 실사용 무관
+- ⚠️ **AF포인트 좌표 오차**: 요청 x=0.30인데 afframe readback ≈0.49(315/640) — 알려진 보정 한계(§5 AF 좌표 보정, 세션 드리프트). 박스 동작 자체는 정상
+- ℹ️ **미리보기 RAW 한계**: file_type=RAW(ARW)면 last_image가 TIFF헤더(`II*`)인데 content-type은 image/jpeg 하드코딩 → 브라우저 표시 불가(UI는 onerror 스킵). JPEG 촬영 시 표시
+- ⏳ **시각 검증 남음(브라우저 필요)**: 포커스 피킹·히스토그램·100% 루페·필름스트립 (라이브뷰 프로듀서·last_image는 동작 확인됨 → 렌더만 사용자 눈으로)
 - ℹ️ 남은 컷 = 0 은 PC 저장 모드(SD 미사용) 시 정상
 - ℹ️ shutter_type/silent_mode = A7C 미노출(null) → dropdown 비활성
 
@@ -114,7 +118,7 @@
 - 착수 시 작업량: lib에 SSH 인증 connect 경로(`ConnectMode::Wifi`+`get_fingerprint`)는 **이미 있음**. 남은 건 IP 등록 FFI(`CreateCameraObjectInfoEthernetConnection`) + 네트워크 연결 UI(IP·SSH 비번). 자동발견(`EnumCameraObjects`)이 잡으면 FFI 불필요(경로 A/B는 지원 바디로 실측).
 
 ### 별도 트랙 — 하드웨어 검증 (코딩 아님)
-- 미검증 누적분 실측 필요(`SHUTTER_TEST.md`): 연사·동영상녹화·촬영취소·셔터타입·사일런트·미리보기·피킹·AF포인트·배터리표시
+- ✅ 대부분 실측 완료(§4 참조): 연사·동영상·AF포인트·미리보기·배터리·readout. 남은 건 시각 검증(피킹·히스토그램·루페·필름스트립)과 취소(0x8401, A7C 미지원 추정)
 - 우선순위 의견: 추정 기반 기능(특히 AF 좌표)을 실기로 확인하는 게 신규 기능 추가보다 우선
 
 ### 제외 확정
