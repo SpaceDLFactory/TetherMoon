@@ -540,6 +540,8 @@ struct SwAfReq {
     fine_count: Option<u32>, // fine 스윕 지점 수(기본 8; coarse best 주변 ±fine_count/2)
     settle_ms: Option<u64>,  // 구동 후 안정 대기(기본 250)
     frames: Option<u32>,     // 지점당 평균 프레임 수(기본 2)
+    threshold: Option<f64>,  // (continuous) baseline 대비 이 비율 미만이면 재합초(기본 0.7)
+    check_ms: Option<u64>,   // (continuous) 모니터 주기(기본 600)
 }
 
 #[derive(Serialize)]
@@ -551,6 +553,76 @@ struct SwAfResult {
     fine_scores: Vec<f64>,
     x: f64,
     y: f64,
+}
+
+/// SW-AF 스윕 파라미터(요청에서 파싱·클램프). lock 코어와 continuous가 공유.
+struct SwAfParams {
+    cx: f64,
+    cy: f64,
+    roi: f64,
+    step: i32,
+    n: u32,
+    fine_step: i32,
+    fine_n: u32,
+    settle: Duration,
+    frames: u32,
+}
+
+impl SwAfParams {
+    fn from_req(b: &SwAfReq) -> Self {
+        let step = b.step.unwrap_or(5).abs().max(1);
+        Self {
+            cx: b.x.unwrap_or(0.5),
+            cy: b.y.unwrap_or(0.5),
+            roi: b.roi.unwrap_or(0.25),
+            step,
+            n: b.count.unwrap_or(24).clamp(4, 200),
+            fine_step: b.fine_step.unwrap_or(1).abs().clamp(1, step),
+            fine_n: b.fine_count.unwrap_or(8).clamp(2, 40),
+            settle: Duration::from_millis(b.settle_ms.unwrap_or(250)),
+            frames: b.frames.unwrap_or(2).clamp(1, 5),
+        }
+    }
+}
+
+/// 합초 1회(coarse→fine + 백래시 보정). (coarse_scores, ck, fine_scores, fk, best_score) 반환.
+/// active=false면 coarse 후 조기 종료(이미 coarse best로 복귀). 진행률은 events로 emit.
+async fn swaf_lock(
+    handle: i64,
+    rx: &mut broadcast::Receiver<Arc<Vec<u8>>>,
+    p: &SwAfParams,
+    active: &std::sync::atomic::AtomicBool,
+    events: &broadcast::Sender<String>,
+) -> (Vec<f64>, usize, Vec<f64>, usize, f64) {
+    use std::sync::atomic::Ordering;
+    // PHASE 1 coarse
+    af_move_near(handle, p.step, (p.n / 2) as usize, p.settle).await;
+    let (coarse_scores, ck) = af_phase(
+        handle, rx, p.cx, p.cy, p.roi, p.frames, p.settle, p.step, p.n, active, events, "coarse",
+    )
+    .await;
+    let coarse_end = coarse_scores.len().saturating_sub(1);
+    af_move_near(handle, p.step, coarse_end.saturating_sub(ck), p.settle).await;
+    if !active.load(Ordering::SeqCst) {
+        let bs = coarse_scores.get(ck).copied().unwrap_or(0.0);
+        return (coarse_scores, ck, Vec::new(), 0, bs);
+    }
+    // PHASE 2 fine
+    af_move_near(handle, p.fine_step, (p.fine_n / 2) as usize, p.settle).await;
+    let (fine_scores, fk) = af_phase(
+        handle, rx, p.cx, p.cy, p.roi, p.frames, p.settle, p.fine_step, p.fine_n, active, events,
+        "fine",
+    )
+    .await;
+    // fine best로 복귀 + 백래시 보정(최종 접근 한 방향=Far)
+    let backlash = 2usize;
+    let fine_end = fine_scores.len().saturating_sub(1);
+    af_move_near(handle, p.fine_step, fine_end.saturating_sub(fk) + backlash, p.settle).await;
+    for _ in 0..backlash {
+        af_drive(handle, p.fine_step).await;
+    }
+    let best_score = fine_scores.get(fk).copied().unwrap_or(0.0);
+    (coarse_scores, ck, fine_scores, fk, best_score)
 }
 
 async fn sw_autofocus(State(s): State<AppState>, Json(b): Json<SwAfReq>) -> Response {
@@ -569,84 +641,113 @@ async fn sw_autofocus(State(s): State<AppState>, Json(b): Json<SwAfReq>) -> Resp
     {
         return (StatusCode::CONFLICT, "autofocus already running").into_response();
     }
-    let cx = b.x.unwrap_or(0.5);
-    let cy = b.y.unwrap_or(0.5);
-    let roi = b.roi.unwrap_or(0.25);
-    let step = b.step.unwrap_or(5).abs().max(1);
-    let n = b.count.unwrap_or(24).clamp(4, 200);
-    let fine_step = b.fine_step.unwrap_or(1).abs().clamp(1, step);
-    let fine_n = b.fine_count.unwrap_or(8).clamp(2, 40);
-    let settle = Duration::from_millis(b.settle_ms.unwrap_or(250));
-    let frames = b.frames.unwrap_or(2).clamp(1, 5);
+    let p = SwAfParams::from_req(&b);
     let active = s.af_active.clone();
     let events = s.events_tx.clone();
     let mut rx = s.lv_tx.subscribe();
 
     // 라이브뷰 가동 확인: 첫 프레임이 안 오면 중단.
-    if af_grab(&mut rx, cx, cy, roi, 1).await.is_none() {
+    if af_grab(&mut rx, p.cx, p.cy, p.roi, 1).await.is_none() {
         active.store(false, Ordering::SeqCst);
         return (StatusCode::PRECONDITION_REQUIRED, "live view not running").into_response();
     }
 
-    // ── PHASE 1: coarse — 현재 초점 기준 ±n/2 큰 스텝 윈도우 풀스윕 ──
-    af_move_near(handle, step, (n / 2) as usize, settle).await;
-    let (coarse_scores, ck) =
-        af_phase(handle, &mut rx, cx, cy, roi, frames, settle, step, n, &active, &events, "coarse")
-            .await;
-    // coarse best로 복귀(far 끝 → Near)
-    let coarse_end = coarse_scores.len().saturating_sub(1);
-    af_move_near(handle, step, coarse_end.saturating_sub(ck), settle).await;
-
-    // ── PHASE 2: fine — coarse best 주변 ±fine_n/2 작은 스텝 ──
-    let mut fine_scores = Vec::new();
-    if active.load(Ordering::SeqCst) {
-        af_move_near(handle, fine_step, (fine_n / 2) as usize, settle).await;
-        let (fs, fk) = af_phase(
-            handle, &mut rx, cx, cy, roi, frames, settle, fine_step, fine_n, &active, &events,
-            "fine",
-        )
-        .await;
-        // fine best로 복귀 + 백래시 보정: Near로 (end-fk+B) 갔다 Far로 B → 최종 접근은 Far(스윕과 동일).
-        let backlash = 2usize;
-        let fine_end = fs.len().saturating_sub(1);
-        af_move_near(handle, fine_step, fine_end.saturating_sub(fk) + backlash, settle).await;
-        for _ in 0..backlash {
-            af_drive(handle, fine_step).await;
-        }
-        fine_scores = fs;
-        // best_index는 fine 기준
-        let best_index = fk;
-        let best_score = fine_scores.get(fk).copied().unwrap_or(0.0);
-        active.store(false, Ordering::SeqCst);
-        tracing::info!(
-            "sw-af: coarse {ck}/{coarse_end} -> fine best {best_index}/{} score {best_score:.0} (x={cx:.2} y={cy:.2})",
-            fine_end
-        );
-        return Json(SwAfResult {
-            best_index,
-            best_score,
-            points: fine_scores.len(),
-            coarse_scores,
-            fine_scores,
-            x: cx,
-            y: cy,
-        })
-        .into_response();
-    }
-
-    // 취소된 경우: coarse 결과만 반환(이미 coarse best로 복귀됨).
+    let (coarse_scores, ck, fine_scores, fk, best_score) =
+        swaf_lock(handle, &mut rx, &p, &active, &events).await;
     active.store(false, Ordering::SeqCst);
-    tracing::info!("sw-af: cancelled in coarse (best {ck}/{coarse_end})");
+
+    // fine까지 갔으면 fine 기준, coarse에서 취소됐으면 coarse 기준.
+    let (best_index, points) = if fine_scores.is_empty() {
+        (ck, coarse_scores.len())
+    } else {
+        (fk, fine_scores.len())
+    };
+    tracing::info!(
+        "sw-af: best {best_index}/{} score {best_score:.0} (x={:.2} y={:.2})",
+        points.saturating_sub(1),
+        p.cx,
+        p.cy
+    );
     Json(SwAfResult {
-        best_index: ck,
-        best_score: coarse_scores.get(ck).copied().unwrap_or(0.0),
-        points: coarse_scores.len(),
+        best_index,
+        best_score,
+        points,
         coarse_scores,
         fine_scores,
-        x: cx,
-        y: cy,
+        x: p.cx,
+        y: p.cy,
     })
     .into_response()
+}
+
+/// 연속 AF: 초기 합초 후 모니터 루프 — ROI 선명도가 baseline 대비 threshold 미만으로
+/// 떨어지면(피사체 이동/카메라 흔들림) 재합초. /cancel(af_active=false)로 정지.
+/// 즉시 "started" 반환하고 백그라운드 진행, 상태는 /events SSE(af_continuous).
+async fn sw_autofocus_continuous(State(s): State<AppState>, Json(b): Json<SwAfReq>) -> Response {
+    use std::sync::atomic::Ordering;
+    let handle = {
+        let g = s.camera.lock().await;
+        match &*g {
+            Some(c) => c.0.device_handle(),
+            None => return (StatusCode::SERVICE_UNAVAILABLE, "not connected").into_response(),
+        }
+    };
+    if s.af_active
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return (StatusCode::CONFLICT, "autofocus already running").into_response();
+    }
+    let p = SwAfParams::from_req(&b);
+    let threshold = b.threshold.unwrap_or(0.7).clamp(0.3, 0.95);
+    let check = Duration::from_millis(b.check_ms.unwrap_or(600).clamp(150, 5000));
+    let active = s.af_active.clone();
+    let events = s.events_tx.clone();
+    let lv_tx = s.lv_tx.clone();
+
+    tokio::spawn(async move {
+        let mut rx = lv_tx.subscribe();
+        if af_grab(&mut rx, p.cx, p.cy, p.roi, 1).await.is_none() {
+            let _ = events.send(
+                r#"{"type":"af_continuous","state":"error","reason":"no_liveview"}"#.to_string(),
+            );
+            active.store(false, Ordering::SeqCst);
+            return;
+        }
+        // 초기 합초
+        let (_, _, _, _, mut baseline) = swaf_lock(handle, &mut rx, &p, &active, &events).await;
+        let _ = events.send(format!(
+            r#"{{"type":"af_continuous","state":"locked","score":{baseline:.0}}}"#
+        ));
+        // 모니터 루프
+        while active.load(Ordering::SeqCst) {
+            tokio::time::sleep(check).await;
+            if !active.load(Ordering::SeqCst) {
+                break;
+            }
+            let cur = af_grab(&mut rx, p.cx, p.cy, p.roi, p.frames)
+                .await
+                .unwrap_or(0.0);
+            if baseline > 0.0 && cur < baseline * threshold {
+                let _ = events.send(format!(
+                    r#"{{"type":"af_continuous","state":"refocus","score":{cur:.0}}}"#
+                ));
+                let (_, _, _, _, nb) = swaf_lock(handle, &mut rx, &p, &active, &events).await;
+                baseline = nb;
+                let _ = events.send(format!(
+                    r#"{{"type":"af_continuous","state":"locked","score":{baseline:.0}}}"#
+                ));
+            } else {
+                let _ = events.send(format!(
+                    r#"{{"type":"af_continuous","state":"hold","score":{cur:.0}}}"#
+                ));
+            }
+        }
+        active.store(false, Ordering::SeqCst);
+        let _ = events.send(r#"{"type":"af_continuous","state":"stopped"}"#.to_string());
+        tracing::info!("sw-af continuous: stopped");
+    });
+    (StatusCode::OK, "continuous started").into_response()
 }
 
 async fn sw_autofocus_cancel(State(s): State<AppState>) -> impl IntoResponse {
@@ -1588,6 +1689,7 @@ async fn main() {
         .route("/api/focus_nearfar", post(focus_near_far))
         .route("/api/focus_nearfar/info", get(focus_nearfar_info))
         .route("/api/sw_autofocus", post(sw_autofocus))
+        .route("/api/sw_autofocus/continuous", post(sw_autofocus_continuous))
         .route("/api/sw_autofocus/cancel", post(sw_autofocus_cancel))
         .route("/api/capabilities", get(capabilities))
         .route("/api/_debug/codes", get(debug_all_codes))
