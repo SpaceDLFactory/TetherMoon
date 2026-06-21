@@ -96,6 +96,12 @@
     box-shadow: 0 0 0 1px rgba(0,0,0,0.5);
     left: 50%; top: 50%;
   }
+  /* SW-AF 측정 ROI 표시(찍은 지점 주변) */
+  .swaf-roi {
+    position: absolute; transform: translate(-50%, -50%);
+    border: 1.5px dashed #ffcc33; box-shadow: 0 0 0 1px rgba(0,0,0,0.6);
+    pointer-events: none; display: none; z-index: 5;
+  }
   .lv-rotate, .lv-grid, .lv-zoom {
     position: absolute; top: 8px; z-index: 6;
     width: 34px; height: 34px; border-radius: 6px;
@@ -414,6 +420,7 @@
     <canvas class="peak-canvas" id="peakCanvas"></canvas>
     <canvas class="loupe-canvas" id="loupeCanvas"></canvas>
     <div class="af-marker" id="afMarker"></div>
+    <div class="swaf-roi" id="swafRoi"></div>
     <div class="lv-frame"></div>
     <div class="lv-thirds"></div>
     <svg class="lv-gridsvg" id="gridSvg" viewBox="0 0 100 100" preserveAspectRatio="none">
@@ -1464,23 +1471,30 @@
   // 버튼 → '지점 클릭' 무장 → 라이브뷰 클릭 → 서버가 NearFar 스윕하며 그 지점 ROI의
   // 선명도(라플라시안 분산)를 측정해 최고점으로 복귀. 실행 중 버튼 = 취소.
   const swafBtn = document.getElementById('swafBtn');
+  const swafRoi = document.getElementById('swafRoi');
+  const SWAF_ROI = 0.25;   // 측정 ROI 한 변 비율(서버 기본과 일치 — 박스/측정 동기)
   let swafArming = false, swafRunning = false;
   const setSwaf = (t) => { swafBtn.textContent = t; };
   swafBtn.addEventListener('click', () => {
     if (swafRunning) { fetch('/api/sw_autofocus/cancel', { method: 'POST' }).catch(()=>{}); return; }
     swafArming = !swafArming;
     swafBtn.classList.toggle('active', swafArming);
+    if (swafArming) swafRoi.style.display = 'none';   // 재무장 시 이전 박스 제거
     setSwaf(swafArming ? 'Click focus point…' : 'SW-AF (pick point)');
   });
   const swafPick = async (sx, sy, r) => {
     swafArming = false;
     const [nx, ny] = unrotateClick(sx, sy, r);
+    // 측정 ROI 박스 표시(찍은 화면 지점 중심, SWAF_ROI 크기) — 무엇이 측정되는지 가시화
+    swafRoi.style.left = (sx*100)+'%'; swafRoi.style.top = (sy*100)+'%';
+    swafRoi.style.width = (SWAF_ROI*100)+'%'; swafRoi.style.height = (SWAF_ROI*100)+'%';
+    swafRoi.style.display = '';
     afMarker.style.left = (sx*100)+'%'; afMarker.style.top = (sy*100)+'%'; afMarker.style.display = '';
     swafRunning = true; swafBtn.classList.add('active'); setSwaf('AF… (cancel)');
     try {
       const res = await fetch('/api/sw_autofocus', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ x: nx, y: ny }),
+        body: JSON.stringify({ x: nx, y: ny, roi: SWAF_ROI }),
       });
       if (res.ok) { const d = await res.json(); setSwaf(`SW-AF ✓ ${d.best_index}/${d.points-1}`); toast('SW-AF 완료', 'ok'); }
       else { setSwaf('SW-AF (pick point)'); toast('SW-AF: ' + (await res.text()), 'err'); }
