@@ -18,8 +18,8 @@ use std::convert::Infallible;
 
 use axum::{
     body::Body,
-    extract::State,
-    http::{header, StatusCode},
+    extract::{Query, State},
+    http::{header, HeaderValue, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Json, Redirect, Response,
@@ -771,6 +771,54 @@ async fn sw_autofocus_cancel(State(s): State<AppState>) -> impl IntoResponse {
     s.af_active
         .store(false, std::sync::atomic::Ordering::SeqCst);
     (StatusCode::OK, "cancel")
+}
+
+#[derive(Deserialize)]
+struct SharpReq {
+    x: Option<f64>,
+    y: Option<f64>,
+    roi: Option<f64>,
+    img: Option<u8>, // 1이면 측정한 프레임(JPEG)을 그대로 반환(눈으로 확인용)
+}
+
+/// 진단: 현재 라이브뷰 프레임의 (x,y) ROI 라플라시안 분산을 측정.
+/// img=1 → 측정에 쓴 그 JPEG을 반환(`X-Sharpness` 헤더에 점수). 아니면 JSON {score}.
+/// "라플라시안 돌리고 이미지를 까봐서 정상값 확인"용.
+async fn debug_sharpness(State(s): State<AppState>, Query(q): Query<SharpReq>) -> Response {
+    let cx = q.x.unwrap_or(0.5);
+    let cy = q.y.unwrap_or(0.5);
+    let roi = q.roi.unwrap_or(0.25);
+    let mut rx = s.lv_tx.subscribe();
+    while rx.try_recv().is_ok() {} // 최신 프레임을 위해 stale 비움
+    let frame = match tokio::time::timeout(Duration::from_millis(800), rx.recv()).await {
+        Ok(Ok(f)) => f,
+        _ => return (StatusCode::PRECONDITION_REQUIRED, "live view not running").into_response(),
+    };
+    let bytes = frame.to_vec();
+    let measured = bytes.clone();
+    let score = tokio::task::spawn_blocking(move || {
+        autofocus::focus_measure(&measured, cx, cy, roi, roi)
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(0.0);
+
+    if q.img == Some(1) {
+        let sval = HeaderValue::from_str(&format!("{score:.1}"))
+            .unwrap_or_else(|_| HeaderValue::from_static("0"));
+        (
+            [
+                (header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg")),
+                (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+                (header::HeaderName::from_static("x-sharpness"), sval),
+            ],
+            bytes,
+        )
+            .into_response()
+    } else {
+        Json(serde_json::json!({ "score": score, "x": cx, "y": cy, "roi": roi })).into_response()
+    }
 }
 
 #[derive(Deserialize)]
@@ -1709,6 +1757,7 @@ async fn main() {
         .route("/api/sw_autofocus/continuous", post(sw_autofocus_continuous))
         .route("/api/sw_autofocus/cancel", post(sw_autofocus_cancel))
         .route("/api/capabilities", get(capabilities))
+        .route("/api/_debug/sharpness", get(debug_sharpness))
         .route("/api/_debug/codes", get(debug_all_codes))
         .route("/api/_debug/enum", get(debug_enum))
         .route("/events", get(events))
