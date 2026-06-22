@@ -633,8 +633,13 @@ async fn swaf_lock(
     for _ in 0..backlash {
         af_drive(handle, p.fine_step).await;
     }
-    let best_score = fine_scores.get(fk).copied().unwrap_or(0.0);
-    (coarse_scores, ck, fine_scores, fk, best_score)
+    // 최종 위치에서 라플라시안(행렬연산)을 한 번 더 측정 → 백래시 보정 이동 후 실제 도달한
+    // 샤프니스 정상값. 스윕 중 fk 점수는 측정 당시 위치 값이라 복귀 후와 다를 수 있어 재측정.
+    tokio::time::sleep(p.settle).await;
+    let final_score = af_grab(rx, p.cx, p.cy, p.roi_w, p.roi_h, p.frames)
+        .await
+        .unwrap_or_else(|| fine_scores.get(fk).copied().unwrap_or(0.0));
+    (coarse_scores, ck, fine_scores, fk, final_score)
 }
 
 async fn sw_autofocus(State(s): State<AppState>, Json(b): Json<SwAfReq>) -> Response {

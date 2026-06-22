@@ -1543,7 +1543,7 @@
     if (swafRunning) { fetch('/api/sw_autofocus/cancel', { method: 'POST' }).catch(()=>{}); return; }
     swafArming = !swafArming;
     swafBtn.classList.toggle('active', swafArming);
-    if (swafArming) swafRoi.style.display = 'none';   // 재무장 시 이전 박스 제거
+    swafRoi.style.display = 'none';   // 무장/해제 어느 쪽이든 이전 ROI 박스 제거
     setSwaf(swafArming ? 'Click focus point…' : 'SW-AF (pick point)');
   });
   // sx,sy = ROI 중심(화면 정규화). roiW/roiH 주면 직사각형 박스, 없으면 슬라이더 ROI(점-선택).
