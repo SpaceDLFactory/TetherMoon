@@ -83,6 +83,7 @@
     object-fit: contain;
     background: #000;
     display: none;            /* connected 시 JS가 표시 */
+    -webkit-user-drag: none; user-select: none;   /* SW-AF 박스 드래그가 이미지 끌기에 안 먹히게 */
   }
   .peak-canvas {
     position: absolute; inset: 0; width: 100%; height: 100%;
@@ -1490,11 +1491,12 @@
   };
   lvWrap.addEventListener('click', (e) => {
     if (e.target.closest('button, .grid-menu')) return;     // 오버레이 버튼/그리드 메뉴 클릭은 무시
-    if (swafArming || swafDragging || swafJustHandled) return; // SW-AF는 pointer(드래그)로 처리
+    if (swafDragging || swafJustHandled) return;            // 드래그가 처리 중/직후(중복 방지)
     const r = lvWrap.getBoundingClientRect();
     const sx = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
     const sy = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
     if (loupeOn) { const [nx, ny] = unrotateClick(sx, sy, r); lfx = nx; lfy = ny; return; } // 줌: 확대 지점
+    if (swafArming) { swafPick(sx, sy, r); return; }        // SW-AF 점-선택(드래그 안 한 클릭). 직사각형은 드래그.
     placeAf(sx, sy);
   });
   document.getElementById('afCenterBtn').addEventListener('click', () => placeAf(0.5, 0.5));
@@ -1586,29 +1588,35 @@
     return { x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
              y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)), r };
   };
-  lvWrap.addEventListener('pointerdown', (e) => {
-    if (!swafArming || e.target.closest('button, .grid-menu')) return;
-    const p = swafPt(e); swafDragStart = p; swafDragging = true;
-    swafRoi.style.left = (p.x*100)+'%'; swafRoi.style.top = (p.y*100)+'%';
-    swafRoi.style.width = '0%'; swafRoi.style.height = '0%'; swafRoi.style.display = '';
-    lvWrap.setPointerCapture(e.pointerId); e.preventDefault();
-  });
-  lvWrap.addEventListener('pointermove', (e) => {
+  // move/up은 document 레벨로 — 겹친 캔버스/SVG나 setPointerCapture 미작동에도 견고,
+  // 마우스가 라이브뷰 밖으로 나가도 박스 추적.
+  const swafDragMove = (e) => {
     if (!swafDragging) return;
     const p = swafPt(e), s = swafDragStart;
     const x0=Math.min(s.x,p.x), x1=Math.max(s.x,p.x), y0=Math.min(s.y,p.y), y1=Math.max(s.y,p.y);
     swafRoi.style.left=((x0+x1)/2*100)+'%'; swafRoi.style.top=((y0+y1)/2*100)+'%';
     swafRoi.style.width=((x1-x0)*100)+'%'; swafRoi.style.height=((y1-y0)*100)+'%';
-  });
-  lvWrap.addEventListener('pointerup', (e) => {
+  };
+  const swafDragEnd = (e) => {
     if (!swafDragging) return;
     swafDragging = false; swafJustHandled = true;
     setTimeout(() => { swafJustHandled = false; }, 50);   // 직후 click 무시
+    document.removeEventListener('pointermove', swafDragMove);
+    document.removeEventListener('pointerup', swafDragEnd);
     const p = swafPt(e), s = swafDragStart;
     const x0=Math.min(s.x,p.x), x1=Math.max(s.x,p.x), y0=Math.min(s.y,p.y), y1=Math.max(s.y,p.y);
     const w=x1-x0, h=y1-y0, bx=(x0+x1)/2, by=(y0+y1)/2;
     if (w < 0.03 || h < 0.03) swafPick(bx, by, s.r);                     // 거의 안 움직임 → 점-선택
     else swafPick(bx, by, s.r, Math.min(1, w), Math.min(1, h));          // 박스
+  };
+  lvWrap.addEventListener('pointerdown', (e) => {
+    if (!swafArming || e.target.closest('button, .grid-menu')) return;
+    const p = swafPt(e); swafDragStart = p; swafDragging = true;
+    swafRoi.style.left = (p.x*100)+'%'; swafRoi.style.top = (p.y*100)+'%';
+    swafRoi.style.width = '0%'; swafRoi.style.height = '0%'; swafRoi.style.display = '';
+    document.addEventListener('pointermove', swafDragMove);
+    document.addEventListener('pointerup', swafDragEnd);
+    e.preventDefault();
   });
 
   // ── AF D-pad 너지 + 방향키 (영역 미세 이동) ──────────────────────────
