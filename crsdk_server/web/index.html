@@ -76,6 +76,7 @@
     background:
       radial-gradient(ellipse at 40% 40%, #353535 0%, #1a1a1a 60%, #0c0c0c 100%);
     overflow: hidden;
+    touch-action: none;   /* 트랙패드/터치 드래그가 SW-AF 박스 그리기로 전달되게 */
   }
   .lv-img {
     position: absolute; inset: 0;
@@ -101,7 +102,7 @@
   .swaf-roi {
     position: absolute; transform: translate(-50%, -50%);
     border: 1.5px dashed #ffcc33; box-shadow: 0 0 0 1px rgba(0,0,0,0.6);
-    pointer-events: none; display: none; z-index: 5;
+    pointer-events: none; display: none; z-index: 50;
   }
   .swaf-cfg { margin-top: 6px; font-size: 12px; }
   .swaf-cfg summary { cursor: pointer; color: var(--fg-mute); padding: 2px 0; user-select: none; }
@@ -1515,11 +1516,18 @@
     roi: parseFloat(swafRoiIn.value), step: parseInt(swafStepIn.value, 10),
     count: parseInt(swafCountIn.value, 10), settle_ms: parseInt(swafSettleIn.value, 10),
   });
+  // ROI 박스 크기를 px로 설정(정규화 w,h 입력). position:absolute + height:%는 부모 .lv가
+  // grid로 height:auto라 0으로 계산돼 박스가 안 보임 → px로 우회.
+  const swafSetSize = (w, h) => {
+    const r = lvWrap.getBoundingClientRect();
+    swafRoi.style.width = (w * r.width) + 'px';
+    swafRoi.style.height = (h * r.height) + 'px';
+  };
   const swafSync = () => {
     swafRoiV.textContent = swafRoiIn.value; swafStepV.textContent = swafStepIn.value;
     swafCountV.textContent = swafCountIn.value; swafSettleV.textContent = swafSettleIn.value;
-    const f = (parseFloat(swafRoiIn.value) * 100) + '%';
-    swafRoi.style.width = f; swafRoi.style.height = f;   // ROI 박스 실시간 크기
+    const v = parseFloat(swafRoiIn.value);
+    swafSetSize(v, v);   // ROI 박스 실시간 크기(정사각형)
   };
   [swafRoiIn, swafStepIn, swafCountIn, swafSettleIn].forEach(el => el.addEventListener('input', swafSync));
   swafSync();
@@ -1546,12 +1554,12 @@
     swafRoi.style.left = (sx*100)+'%'; swafRoi.style.top = (sy*100)+'%';
     const cfg = swafCfg();
     if (roiW != null) {                       // 박스 드래그: roi_w/h 사용
-      swafRoi.style.width = (roiW*100)+'%'; swafRoi.style.height = (roiH*100)+'%';
+      swafSetSize(roiW, roiH);
       delete cfg.roi; cfg.roi_w = roiW; cfg.roi_h = roiH;
     } else {
       swafSync();                             // 점-선택: 박스 크기 = 슬라이더 ROI
     }
-    swafRoi.style.display = '';
+    swafRoi.style.display = 'block';
     afMarker.style.left = (sx*100)+'%'; afMarker.style.top = (sy*100)+'%'; afMarker.style.display = '';
     swafCont = swafContIn.checked;
     swafRunning = true; swafBtn.classList.add('active');
@@ -1595,7 +1603,7 @@
     const p = swafPt(e), s = swafDragStart;
     const x0=Math.min(s.x,p.x), x1=Math.max(s.x,p.x), y0=Math.min(s.y,p.y), y1=Math.max(s.y,p.y);
     swafRoi.style.left=((x0+x1)/2*100)+'%'; swafRoi.style.top=((y0+y1)/2*100)+'%';
-    swafRoi.style.width=((x1-x0)*100)+'%'; swafRoi.style.height=((y1-y0)*100)+'%';
+    swafSetSize(x1-x0, y1-y0);
   };
   const swafDragEnd = (e) => {
     if (!swafDragging) return;
@@ -1613,7 +1621,7 @@
     if (!swafArming || e.target.closest('button, .grid-menu')) return;
     const p = swafPt(e); swafDragStart = p; swafDragging = true;
     swafRoi.style.left = (p.x*100)+'%'; swafRoi.style.top = (p.y*100)+'%';
-    swafRoi.style.width = '0%'; swafRoi.style.height = '0%'; swafRoi.style.display = '';
+    swafSetSize(0, 0); swafRoi.style.display = 'block';
     document.addEventListener('pointermove', swafDragMove);
     document.addEventListener('pointerup', swafDragEnd);
     e.preventDefault();
