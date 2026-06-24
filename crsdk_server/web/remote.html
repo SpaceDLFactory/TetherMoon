@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<!-- TetherMoon 미니멀 리모컨: 라이브뷰(/lv) 없이 셔터/AF/REC + 노출 조정만.
+     미리보기를 안 띄우므로 모바일에서 가볍고(스트림 없음) 케이블 릴리즈처럼 쓴다.
+     SW-AF는 라이브뷰 위 포커스 점 찍기가 필요해 여기선 제외, 카메라 자체 AF(S1)만. -->
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>TetherMoon · Remote</title>
+<style>
+  :root {
+    --bg: #1f1f1f; --bg-2: #2a2a2a; --bg-3: #303030;
+    --fg: #e8e8e8; --fg-dim: #9b9b9b; --fg-mute: #6a6a6a;
+    --accent: #4a9eff; --danger: #ef4444; --good: #34d399;
+    --border: #3a3a3a;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--fg); font: 15px/1.4 -apple-system, system-ui, sans-serif;
+    display: flex; flex-direction: column; max-width: 520px; margin: 0 auto; padding: 12px;
+    gap: 12px; user-select: none;
+  }
+  .topbar {
+    display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--fg-dim);
+  }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--fg-mute); flex: none; }
+  .dot.on { background: var(--good); }
+  .topbar .model { color: var(--fg); font-weight: 600; }
+  .topbar .sp { flex: 1; }
+  a.nav, button.nav {
+    color: var(--fg-dim); text-decoration: none; background: var(--bg-2);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 13px;
+  }
+  a.nav:active { background: var(--bg-3); }
+
+  .exp { display: flex; flex-direction: column; gap: 8px; }
+  .exprow {
+    display: grid; grid-template-columns: 44px 1fr 56px 56px; align-items: center; gap: 8px;
+    background: var(--bg-2); border: 1px solid var(--border); border-radius: 12px; padding: 8px 10px;
+  }
+  .exprow .lbl { color: var(--fg-dim); font-size: 12px; font-weight: 600; letter-spacing: .04em; }
+  .exprow .val { text-align: center; font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .exprow button {
+    height: 48px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-3);
+    color: var(--fg); font-size: 24px; font-weight: 600;
+  }
+  .exprow button:active:not(:disabled) { background: var(--accent); border-color: var(--accent); }
+  .exprow button:disabled { color: var(--fg-mute); opacity: .5; }
+
+  .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .actions button {
+    border: 1px solid var(--border); border-radius: 14px; background: var(--bg-2); color: var(--fg);
+    font-size: 17px; font-weight: 600; padding: 18px 0;
+  }
+  .actions button:active:not(:disabled) { background: var(--bg-3); }
+  .actions button:disabled { opacity: .4; }
+  #afBtn { color: var(--accent); }
+  #shutterBtn { grid-column: span 1; background: var(--accent); border-color: var(--accent); color: #fff; font-size: 19px; }
+  #recBtn { grid-column: span 2; }
+  #recBtn.rec { background: var(--danger); border-color: var(--danger); color: #fff; }
+  #recBtn .ico { color: var(--danger); }
+  #recBtn.rec .ico { color: #fff; }
+
+  .thumb {
+    border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--bg-2);
+    min-height: 60px; display: flex; align-items: center; justify-content: center; color: var(--fg-mute); font-size: 13px;
+  }
+  .thumb img { width: 100%; display: block; }
+  .toast {
+    position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+    background: var(--bg-3); border: 1px solid var(--border); border-radius: 10px;
+    padding: 8px 14px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none;
+  }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="dot" id="dot"></span>
+    <span class="model" id="model">—</span>
+    <span id="bat" style="color:var(--fg-dim)"></span>
+    <span class="sp"></span>
+    <a class="nav" href="/web/index.html">미리보기 ↗</a>
+  </div>
+
+  <div class="exp">
+    <div class="exprow" data-code="260" data-kind="iso">
+      <span class="lbl">ISO</span><span class="val">—</span>
+      <button class="dn" type="button">−</button><button class="up" type="button">+</button>
+    </div>
+    <div class="exprow" data-code="259" data-kind="shutter">
+      <span class="lbl">SS</span><span class="val">—</span>
+      <button class="dn" type="button">−</button><button class="up" type="button">+</button>
+    </div>
+    <div class="exprow" data-code="256" data-kind="aperture">
+      <span class="lbl">F</span><span class="val">—</span>
+      <button class="dn" type="button">−</button><button class="up" type="button">+</button>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button id="afBtn" type="button">AF</button>
+    <button id="shutterBtn" type="button">SHUTTER</button>
+    <button id="recBtn" type="button"><span class="ico">●</span> REC</button>
+  </div>
+
+  <div class="thumb" id="thumb">아직 촬영 없음</div>
+  <div class="toast" id="toast"></div>
+
+<script>
+  // raw 값 → 라벨 (index.html dec와 동일 규칙; allowed[]의 SDK 쓰레기값은 null로 걸러짐).
+  const dec = {
+    iso: v => {
+      v = v >>> 0;
+      if (v === 0xFFFFFF) return 'AUTO';
+      if (v >= 0x20000000) return null;
+      const n = v & 0xFFFFFF;
+      return (n >= 25 && n <= 819200) ? String(n) : null;
+    },
+    shutter: v => {
+      if (v === 0) return 'BULB';
+      const num = v >>> 16, den = v & 0xFFFF;
+      if (!den || num === 0 || num > 0x2000) return null;
+      if (num === 1) return `1/${den}`;
+      if (num % den === 0) return `${num / den}"`;
+      return `${(num / den).toFixed(1)}"`;
+    },
+    aperture: v => (v >= 100 && v <= 9999) ? (v / 100).toFixed(1) : null,
+  };
+
+  const $ = s => document.querySelector(s);
+  const toastEl = $('#toast');
+  let toastT;
+  const toast = msg => {
+    toastEl.textContent = msg; toastEl.classList.add('show');
+    clearTimeout(toastT); toastT = setTimeout(() => toastEl.classList.remove('show'), 1400);
+  };
+
+  const setProp = async (code, value) => {
+    try {
+      const r = await fetch('/api/property', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: Number(code), value: Number(value) }),
+      });
+      if (!r.ok) toast('설정 실패: ' + (await r.text()));
+    } catch { toast('설정 실패'); }
+  };
+
+  // 각 노출 행: decode 가능한 allowed 값만 추려 인덱스 스테핑. cur는 그 목록 안에서 이동.
+  document.querySelectorAll('.exprow').forEach(row => {
+    const code = row.dataset.code, kind = row.dataset.kind, decode = dec[kind];
+    const valEl = row.querySelector('.val'), dn = row.querySelector('.dn'), up = row.querySelector('.up');
+    row._list = []; row._cur = null;
+
+    const step = dir => {
+      const list = row._list;
+      if (!list.length) return;
+      let i = list.findIndex(o => o.v === row._cur);
+      if (i < 0) i = 0;
+      const ni = Math.min(list.length - 1, Math.max(0, i + dir));
+      if (ni === i) return;
+      const next = list[ni];
+      row._cur = next.v;                 // 낙관적 갱신 (다음 폴링이 확정)
+      valEl.textContent = next.label;
+      setProp(code, next.v);
+    };
+    dn.addEventListener('click', () => step(-1));
+    up.addEventListener('click', () => step(+1));
+
+    row._apply = prop => {
+      if (!prop) { valEl.textContent = '—'; dn.disabled = up.disabled = true; row._list = []; return; }
+      const seen = new Set(), seenL = new Set(), list = [];
+      for (const v of (prop.allowed || [])) {
+        if (seen.has(v)) continue;
+        const label = decode(v);
+        if (label == null || seenL.has(label)) continue;
+        seen.add(v); seenL.add(label); list.push({ v, label });
+      }
+      if (!seen.has(prop.value)) list.unshift({ v: prop.value, label: decode(prop.value) ?? String(prop.value) });
+      row._list = list; row._cur = prop.value;
+      valEl.textContent = decode(prop.value) ?? String(prop.value);
+      dn.disabled = up.disabled = list.length <= 1;
+    };
+  });
+
+  // 액션
+  const post = async (path) => {
+    try { const r = await fetch(path, { method: 'POST' }); return r.ok ? null : await r.text(); }
+    catch { return 'network'; }
+  };
+
+  $('#afBtn').addEventListener('click', async () => {
+    await post('/api/half/down');
+    setTimeout(() => post('/api/half/up'), 600);   // 짧게 반셔터 → 카메라 AF 구동
+    toast('AF');
+  });
+
+  $('#shutterBtn').addEventListener('click', async () => {
+    const err = await post('/api/shutter');
+    toast(err ? '셔터 실패: ' + err : '촬영');
+  });
+
+  let recording = false;
+  $('#recBtn').addEventListener('click', async () => {
+    const err = await post(recording ? '/api/movie/stop' : '/api/movie/start');
+    if (err) toast('REC 실패: ' + err);
+  });
+
+  // 마지막 컷 썸네일 — download_complete를 직접 못 받으니(SSE 미사용) 촬영 후 잠깐 뒤 시도 + 폴링.
+  const thumb = $('#thumb');
+  let lastThumbAt = 0;
+  const refreshThumb = () => {
+    const img = new Image();
+    img.onload = () => { thumb.innerHTML = ''; thumb.appendChild(img); lastThumbAt = Date.now(); };
+    img.src = '/api/last_image?t=' + Date.now();
+  };
+
+  // 상태 + 노출값 폴링 (라이브뷰 없음 → 이 폴링이 유일한 갱신원).
+  const setRec = on => {
+    recording = on;
+    const b = $('#recBtn');
+    b.classList.toggle('rec', on);
+    b.innerHTML = on ? '■ STOP' : '<span class="ico">●</span> REC';
+  };
+
+  const poll = async () => {
+    try {
+      const st = await (await fetch('/api/status', { cache: 'no-store' })).json();
+      const conn = st.state === 'connected';
+      $('#dot').classList.toggle('on', conn);
+      $('#model').textContent = conn ? st.model : '미연결';
+      document.querySelectorAll('.actions button, .exprow button').forEach(b => { if (!b.dataset.always) b.disabled = !conn; });
+      if (!conn) return;
+
+      const p = await (await fetch('/api/properties', { cache: 'no-store' })).json();
+      document.querySelector('.exprow[data-kind=iso]')._apply(p.iso);
+      document.querySelector('.exprow[data-kind=shutter]')._apply(p.shutter_speed);
+      document.querySelector('.exprow[data-kind=aperture]')._apply(p.f_number);
+      if (p.recording_state) setRec(p.recording_state.value === 1);
+      $('#bat').textContent = p.battery ? '· BAT ' + p.battery.value + '%' : '';
+    } catch {}
+  };
+
+  refreshThumb();
+  setInterval(refreshThumb, 4000);   // 새 컷 자동 반영 (라이브뷰 없으니 가벼운 폴링)
+  poll();
+  setInterval(poll, 2000);
+</script>
+</body>
+</html>
