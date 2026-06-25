@@ -37,6 +37,7 @@ use tokio_stream::{wrappers::BroadcastStream, Stream, StreamExt};
 use tower_http::services::ServeDir;
 
 mod autofocus; // SW-AF: 라이브뷰 프레임 선명도 측정
+mod composite; // 다중노출/스태킹: JPEG N장 → 1장 합성
 
 // ── macOS USB 간섭 억제 (ptpcamerad) ────────────────────────────────────
 // launchd가 ~100ms마다 ptpcamerad를 재시작하며 USB PTP 인터페이스를 선점한다.
@@ -120,6 +121,7 @@ struct AppState {
     lv_tx: broadcast::Sender<Arc<Vec<u8>>>, // LiveView 프레임 fan-out (다중 클라이언트)
     lv_running: Arc<std::sync::Mutex<bool>>, // LiveView 프로듀서 가동 여부 (시작/종료 race 방지용 락)
     af_active: Arc<std::sync::atomic::AtomicBool>, // SW-AF 스윕 진행중 (단일 실행 + 취소 신호 겸용)
+    me_active: Arc<std::sync::atomic::AtomicBool>, // 다중노출 시퀀스 진행중 (중복 트리거 방지)
 }
 
 // ── /api/status DTO ─────────────────────────────────────────────────────
@@ -1227,6 +1229,138 @@ async fn last_image(State(s): State<AppState>) -> Response {
     }
 }
 
+// ── 다중노출 (소프트웨어 — A7C엔 없는 기능) ──────────────────────────────
+#[derive(Deserialize)]
+struct MultiExpReq {
+    count: Option<u32>,           // 합칠 장수(기본 3)
+    mode: Option<String>,         // "average"|"lighten"|"add"(기본 average)
+    shot_timeout_ms: Option<u64>, // 장당 JPEG 다운로드 대기(기본 12000; RAW 느림)
+}
+
+/// events_tx(JSON)에서 다음 JPEG download_complete 파일경로를 기다림. RAW 등 비-JPEG는 건너뜀.
+async fn wait_jpeg_download(
+    rx: &mut broadcast::Receiver<String>,
+    timeout: Duration,
+) -> Result<String, String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err("다운로드 타임아웃".into());
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(msg)) => {
+                let v: serde_json::Value = match serde_json::from_str(&msg) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if v.get("type").and_then(|t| t.as_str()) != Some("download_complete") {
+                    continue;
+                }
+                if let Some(f) = v.get("filename").and_then(|f| f.as_str()) {
+                    let lf = f.to_lowercase();
+                    if lf.ends_with(".jpg") || lf.ends_with(".jpeg") {
+                        return Ok(f.to_string());
+                    }
+                    // RAW(.arw) 등은 무시하고 JPEG 계속 대기
+                }
+            }
+            Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+            _ => return Err("다운로드 타임아웃".into()),
+        }
+    }
+}
+
+/// N장 연속 촬영 → 다운로드된 JPEG들을 블렌드 합성 → 1장 저장. 진행/완료는 events SSE.
+async fn multi_exposure(State(s): State<AppState>, Json(b): Json<MultiExpReq>) -> Response {
+    use std::sync::atomic::Ordering;
+    let count = b.count.unwrap_or(3).clamp(2, 30);
+    let mode = composite::Blend::from_str(b.mode.as_deref().unwrap_or("average"));
+    let shot_timeout = Duration::from_millis(b.shot_timeout_ms.unwrap_or(12000));
+
+    let handle = {
+        let g = s.camera.lock().await;
+        match &*g {
+            Some(c) => c.0.device_handle(),
+            None => return (StatusCode::SERVICE_UNAVAILABLE, "not connected").into_response(),
+        }
+    };
+    if s
+        .me_active
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return (StatusCode::CONFLICT, "multi-exposure already running").into_response();
+    }
+    let events = s.events_tx.clone();
+    // 첫 셔터 전에 구독해야 다운로드 이벤트를 놓치지 않음.
+    let mut ev_rx = s.events_tx.subscribe();
+
+    let mut files: Vec<String> = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let shot = tokio::task::spawn_blocking(move || capture_one(handle)).await;
+        let shot = shot
+            .map_err(|e| format!("task: {e}"))
+            .and_then(|r| r.map_err(|e| format!("sdk: {e:?}")));
+        if let Err(e) = shot {
+            s.me_active.store(false, Ordering::SeqCst);
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("capture {}/{count}: {e}", i + 1))
+                .into_response();
+        }
+        match wait_jpeg_download(&mut ev_rx, shot_timeout).await {
+            Ok(f) => files.push(f),
+            Err(e) => {
+                s.me_active.store(false, Ordering::SeqCst);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("frame {}/{count}: {e} — JPEG 저장(STILL→PC, 파일형식 JPEG) 필요", i + 1),
+                )
+                    .into_response();
+            }
+        }
+        let _ = events.send(format!(
+            r#"{{"type":"multi_exposure","i":{},"n":{count}}}"#,
+            i + 1
+        ));
+    }
+
+    // 합성(CPU): 파일 읽기 + 블렌드 → spawn_blocking.
+    let files2 = files.clone();
+    let blended = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        let mut jpegs = Vec::with_capacity(files2.len());
+        for f in &files2 {
+            jpegs.push(std::fs::read(f).map_err(|e| format!("read {f}: {e}"))?);
+        }
+        composite::blend_jpegs(&jpegs, mode)
+    })
+    .await;
+    s.me_active.store(false, Ordering::SeqCst);
+
+    let out = match blended {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(e)) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("blend: {e}")).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("task: {e}")).into_response(),
+    };
+
+    // 저장: save_path/ME_<epoch>.jpg → 미리보기(last_image)로도 노출.
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let save_dir = s.save_path.lock().await.clone();
+    let path = std::path::Path::new(&save_dir).join(format!("ME_{secs}.jpg"));
+    if let Err(e) = tokio::fs::write(&path, &out).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("save: {e}")).into_response();
+    }
+    let path_str = path.to_string_lossy().to_string();
+    *s.last_image.lock().await = Some(path_str.clone());
+    let _ = events.send(format!(
+        r#"{{"type":"multi_exposure_done","file":{}}}"#,
+        serde_json::json!(path_str)
+    ));
+    Json(serde_json::json!({"file": path_str, "count": count})).into_response()
+}
+
 // ── AF 포인트 지정 (정규화 0~1 → x:0~639 y:0~479, (x<<16)|y device property) ──
 // 좌표계/패킹은 공식 RemoteCli 샘플(execute_pos_xy)을 따름. 위치 지정엔 FocusArea가
 // Flexible Spot이어야 하므로 좌표 설정 전에 Flexible_Spot_S로 전환한다.
@@ -1706,6 +1840,7 @@ async fn main() {
         lv_tx: broadcast::channel::<Arc<Vec<u8>>>(4).0,
         lv_running: Arc::new(std::sync::Mutex::new(false)),
         af_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        me_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
 
     // 자동 (재)연결 루프: 미연결 상태면 3초마다 connect 시도.
@@ -1746,6 +1881,7 @@ async fn main() {
         .route("/api/movie/stop", post(movie_stop))
         .route("/api/cancel", post(cancel_shooting))
         .route("/api/last_image", get(last_image))
+        .route("/api/multi_exposure", post(multi_exposure))
         .route("/api/af_point", post(af_point))
         .route("/api/properties", get(properties))
         .route("/api/property", post(set_property))

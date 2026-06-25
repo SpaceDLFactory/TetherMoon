@@ -525,6 +525,22 @@
     </div>
 
     <div class="card">
+      <h3>Multi-Exposure</h3>
+      <div class="row"><span class="k" data-i18n="lbl.count">Count</span><input class="path-in" id="meCount" type="number" min="2" max="30" value="3" style="width:90px;flex:0 0 auto;"></div>
+      <div class="row"><span class="k">Blend</span>
+        <select class="sel" id="meMode" style="flex:0 0 auto;">
+          <option value="average">Average</option>
+          <option value="lighten">Lighten</option>
+          <option value="add">Add</option>
+        </select>
+      </div>
+      <button class="btn" id="meBtn" type="button" style="width:100%;margin-top:6px;">Shoot &amp; Blend</button>
+      <div class="row" id="meStatus" style="margin-top:6px;color:var(--fg-mute);font-size:10px;">
+        <span>N장 연속 촬영 → 서버 합성. JPEG 저장(STILL→PC) + 삼각대 권장.</span>
+      </div>
+    </div>
+
+    <div class="card">
       <h3 data-i18n="card.drivemetering">Drive · Metering</h3>
       <div class="row"><span class="k">Drive</span><select class="sel" id="selDrive" data-code="270"></select></div>
       <div class="row"><span class="k">Metering</span><select class="sel" id="selMetering" data-code="266"></select></div>
@@ -948,6 +964,27 @@
     ivTimer = setInterval(tick, interval * 1000);
   });
 
+  // ── 다중노출 (소프트웨어) ─────────────────────────────────────────────
+  const meBtn = document.getElementById('meBtn');
+  const meStatusEl = document.querySelector('#meStatus span');
+  const meSetStatus = (txt) => { if (meStatusEl) meStatusEl.textContent = txt; };
+  meBtn.addEventListener('click', async () => {
+    if (meBtn.disabled) return;
+    const count = Math.max(2, Math.min(30, parseInt(document.getElementById('meCount').value, 10) || 3));
+    const mode = document.getElementById('meMode').value;
+    meBtn.disabled = true;
+    meSetStatus(`Shooting 0/${count}…`);
+    try {
+      const r = await fetch('/api/multi_exposure', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ count, mode }),
+      });
+      if (!r.ok) { meSetStatus(`✕ ${await r.text()}`); }
+      // 성공 시 결과 미리보기는 SSE(multi_exposure_done)가 처리.
+    } catch (e) { meSetStatus(`✕ ${e.message}`); }
+    meBtn.disabled = false;
+  });
+
   // ── 속성 컨트롤 ───────────────────────────────────────────────────────
   const selIso      = document.getElementById('selIso');
   const selShutter  = document.getElementById('selShutter');
@@ -1349,6 +1386,14 @@
       case 'af_continuous':          // 연속 AF 상태(locked/hold/refocus/stopped)
         if (ev.state === 'stopped') { swafReset(); }
         else if (swafRunning && swafCont) setSwaf(`AF·${ev.state} (stop)`);
+        break;
+      case 'multi_exposure':         // 다중노출 진행률(장당 emit)
+        meSetStatus(`Shooting ${ev.i}/${ev.n}…`);
+        break;
+      case 'multi_exposure_done':    // 합성 완료 → 결과 미리보기
+        meSetStatus('Blended ✓');
+        showPreview();
+        addToFilmstrip();
         break;
       // warning / lv_property_changed 등은 조용히 무시
     }
