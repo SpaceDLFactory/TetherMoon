@@ -325,6 +325,15 @@
     background: var(--accent); border: 0; margin-top: -6px; cursor: pointer;
   }
   .nf-slider input[type=range]:disabled::-webkit-slider-thumb { background: var(--fg-mute); cursor: not-allowed; }
+  /* Firefox: -webkit- 의사요소는 안 먹으므로 -moz-로 미러(슬라이더 외관 동일하게). */
+  .nf-slider input[type=range]::-moz-range-track {
+    height: 3px; background: var(--line-2); border-radius: 2px;
+  }
+  .nf-slider input[type=range]::-moz-range-thumb {
+    width: 14px; height: 14px; border-radius: 50%;
+    background: var(--accent); border: 0; cursor: pointer;
+  }
+  .nf-slider input[type=range]:disabled::-moz-range-thumb { background: var(--fg-mute); cursor: not-allowed; }
   .nf-val { color: var(--fg); min-width: 28px; text-align: right; font-size: 12px; }
   .btn {
     appearance: none; -webkit-appearance: none;
