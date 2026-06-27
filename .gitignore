@@ -26,6 +26,10 @@
 /.claude
 /.omc
 
+# 개발 내부 문서 (로컬 유지, 공개 리포 미포함)
+/STATUS.md
+/ARCHITECTURE.md
+
 # macOS
 .DS_Store
 /notes

@@ -75,10 +75,17 @@ The rest of this README is for **building from source**.
   rotation-aware), AF-area mode (Wide/Zone/Center/Flexible S·M·L/Tracking),
   half-shutter (S1) with focus-indication feedback
 - **Software AF** — contrast-detect autofocus while in MF: pick a point on the live
-  view, the server sweeps focus (coarse → fine, backlash-compensated) measuring
-  Laplacian-variance sharpness in that ROI, with a live ROI box and real-time
-  sweep progress. Works on bodies (like the A7C) that lack an absolute-focus API
+  view, the server runs a multi-resolution focus sweep (coarse range → fine zoom-in)
+  measuring Laplacian-variance sharpness in that ROI, with backlash-robust landing,
+  a live ROI box, and real-time progress. Works on bodies (like the A7C) that lack
+  an absolute-focus API
 - **Capture** — single, burst (press-hold), movie record, cancel
+- **Multiple exposure** — software multi-exposure (the A7C has no in-body version):
+  shoot N frames and blend them server-side into one image — *average* (classic),
+  *lighten* (bright pixels accumulate — light trails/stars), or *add*
+- **Minimal remote** — a preview-less mobile page (cable-release style): shutter, AF,
+  movie record, and quick ISO/shutter/aperture, with no live-view stream (light on
+  battery)
 - **Long exposure** — fixed 1″–30″, BULB, and a **software bulb timer** (1–900 s)
 - **Timelapse** — software interval shooting (count × interval) with cancel
 - **Save** — to PC with custom folder/prefix, capture preview, battery & shots-remaining
