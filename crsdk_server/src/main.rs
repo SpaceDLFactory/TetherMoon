@@ -481,8 +481,9 @@ async fn af_grab(
     }
 }
 
-/// 현재 위치에서 Far(+step)로 n번 이동하며 n+1 지점 측정. (scores, best_index) 반환.
-/// active=false면 즉시 중단(부분 scores). 끝나면 focus는 마지막 측정 지점(far 끝).
+/// 현재 위치에서 Far(+step)로 n번 이동하며 측정. (scores, best_index, bracketed) 반환.
+/// bracketed=true면 피크를 지나 명확히 하강해 **조기 종료**(남은 윈도우 측정 생략 = 속도).
+/// active=false면 즉시 중단(부분 scores). 끝나면 focus는 마지막 측정 지점.
 #[allow(clippy::too_many_arguments)]
 async fn af_phase(
     handle: i64,
@@ -498,11 +499,13 @@ async fn af_phase(
     active: &std::sync::atomic::AtomicBool,
     events: &broadcast::Sender<String>,
     phase: &str,
-) -> (Vec<f64>, usize) {
+) -> (Vec<f64>, usize, bool) {
     use std::sync::atomic::Ordering;
     let mut scores = Vec::with_capacity(n as usize + 1);
     let mut best = -1.0f64;
     let mut best_k = 0usize;
+    let mut drops = 0u32; // best 대비 급락 연속 횟수
+    let mut bracketed = false;
     for i in 0..=n as usize {
         if !active.load(Ordering::SeqCst) {
             break;
@@ -511,28 +514,80 @@ async fn af_phase(
         if sc > best {
             best = sc;
             best_k = i;
+            drops = 0;
+        } else if sc < best * 0.6 {
+            drops += 1; // 피크 대비 급락
+        } else {
+            drops = 0; // 어깨/노이즈 1점은 리셋(broad peak 보호)
         }
         scores.push(sc);
         // 진행률을 SSE로 흘려 UI가 실시간 표시.
         let _ = events.send(format!(
             r#"{{"type":"af_progress","phase":"{phase}","i":{i},"n":{n},"score":{sc:.0}}}"#
         ));
+        // 피크를 충분히 지나 3연속 급락 → 가둠 확정, 남은 윈도우 측정 생략(속도). 보수적이라
+        // 평탄/broad 장면은 발동 안 함(그땐 끝까지 측정 후 margin/widen 판정).
+        if drops >= 3 && best > 0.0 {
+            bracketed = true;
+            break;
+        }
         if i < n as usize {
             af_drive(handle, step).await;
             tokio::time::sleep(settle).await;
         }
     }
-    (scores, best_k)
+    (scores, best_k, bracketed)
 }
 
-/// Near 방향(-)으로 step을 times번 구동 후 settle.
+/// Near 방향(-)으로 step을 times번 구동. **스텝마다 settle** — rapid 연속 NearFar는
+/// 카메라가 대부분 드롭해(실측: -10 rapid가 +10 settled를 못 되돌림) 의도한 거리만큼 안 움직인다.
+/// 측정 스윕과 동일 cadence라야 재현-기하(measure_and_land)가 성립.
 async fn af_move_near(handle: i64, step: i32, times: usize, settle: Duration) {
     for _ in 0..times {
         af_drive(handle, -step.abs()).await;
-    }
-    if times > 0 {
         tokio::time::sleep(settle).await;
     }
+}
+
+/// 백래시 강건한 측정+착지: 현재 위치 중심 ±(m/2·step) 윈도우를 측정하고 피크 위치에 정착.
+/// 핵심 — 백래시는 *방향 반전*에서 생기므로, 측정 스윕(−오버슈트→+스윕)과 착지를 **동일 기하로
+/// 재현**한다: 스윕 시작점으로 −방향 복귀 후 +방향으로 정확히 pk스텝. 측정 때와 같은 −→+ 진입이라
+/// pk 물리 위치가 그대로 재현된다(step 카운트가 반전 없이 선형 → 신뢰). (scores, pk) 반환.
+#[allow(clippy::too_many_arguments)]
+async fn measure_and_land(
+    handle: i64,
+    rx: &mut broadcast::Receiver<Arc<Vec<u8>>>,
+    cx: f64,
+    cy: f64,
+    roi_w: f64,
+    roi_h: f64,
+    frames: u32,
+    settle: Duration,
+    move_gap: Duration,
+    step: i32,
+    m: u32,
+    active: &std::sync::atomic::AtomicBool,
+    events: &broadcast::Sender<String>,
+    phase: &str,
+) -> (Vec<f64>, usize, bool) {
+    // 재배치 이동(오버슈트·복귀·착지)은 측정을 안 하므로 settle(이미지 안정화용 250ms)이 아니라
+    // 명령 등록만 되는 move_gap으로 충분 — 등록되면 스텝당 이동량은 gap과 무관해 재현-기하 유지.
+    // 측정 스윕(af_phase)만 settle. (rapid=0ms는 드롭되니 move_gap은 등록 임계 위로.)
+    // 1) −방향 오버슈트(래시를 Near로 확립) + 윈도우 중심 정렬.
+    af_move_near(handle, step, (m / 2) as usize, move_gap).await;
+    // 2) +방향 측정 스윕 → pk. (focus는 +방향 끝. bracketed면 조기 종료.)
+    let (scores, pk, bracketed) = af_phase(
+        handle, rx, cx, cy, roi_w, roi_h, frames, settle, step, m, active, events, phase,
+    )
+    .await;
+    // 3) 측정과 동일 기하 재현 착지: 스윕 시작점으로 −복귀(= +스윕한 만큼) 후 +방향 pk스텝.
+    let swept = scores.len().saturating_sub(1); // 실제 +구동 횟수(조기종료/취소 시 부분)
+    af_move_near(handle, step, swept, move_gap).await;
+    for _ in 0..pk {
+        af_drive(handle, step).await;
+        tokio::time::sleep(move_gap).await;
+    }
+    (scores, pk, bracketed)
 }
 
 #[derive(Deserialize)]
@@ -544,9 +599,9 @@ struct SwAfReq {
     roi_h: Option<f64>,      // ROI 세로 비율(직사각형 박스 — 없으면 roi)
     step: Option<i32>,       // coarse NearFar 스텝(기본 5)
     count: Option<u32>,      // coarse 스윕 지점 수(기본 24; 윈도우 = ±count/2 스텝)
-    fine_step: Option<i32>,  // fine NearFar 스텝(기본 1=granularity)
-    fine_count: Option<u32>, // fine 스윕 지점 수(기본 8; coarse best 주변 ±fine_count/2)
-    settle_ms: Option<u64>,  // 구동 후 안정 대기(기본 250)
+    fine_step: Option<i32>,  // 캐스케이드 종착 스텝(기본 1=granularity, 정밀)
+    settle_ms: Option<u64>,  // 측정 전 안정 대기(기본 250)
+    move_ms: Option<u64>,    // 재배치 이동 스텝 gap(측정 아님 — 등록만, 기본 120)
     frames: Option<u32>,     // 지점당 평균 프레임 수(기본 2)
     threshold: Option<f64>,  // (continuous) baseline 대비 이 비율 미만이면 재합초(기본 0.7)
     check_ms: Option<u64>,   // (continuous) 모니터 주기(기본 600)
@@ -572,14 +627,15 @@ struct SwAfParams {
     step: i32,
     n: u32,
     fine_step: i32,
-    fine_n: u32,
     settle: Duration,
+    fine_settle: Duration,
+    move_gap: Duration,
     frames: u32,
 }
 
 impl SwAfParams {
     fn from_req(b: &SwAfReq) -> Self {
-        let step = b.step.unwrap_or(5).abs().max(1);
+        let step = b.step.unwrap_or(8).abs().max(1); // 다중해상도 레벨0 시작 스텝(범위용, 큼)
         Self {
             cx: b.x.unwrap_or(0.5),
             cy: b.y.unwrap_or(0.5),
@@ -588,8 +644,10 @@ impl SwAfParams {
             step,
             n: b.count.unwrap_or(24).clamp(4, 200),
             fine_step: b.fine_step.unwrap_or(1).abs().clamp(1, step),
-            fine_n: b.fine_count.unwrap_or(8).clamp(2, 40),
             settle: Duration::from_millis(b.settle_ms.unwrap_or(250)),
+            // fine/refine은 step이 작아 이미지가 빨리 안정 → 측정 settle 절반(최소 100ms).
+            fine_settle: Duration::from_millis((b.settle_ms.unwrap_or(250) / 2).max(100)),
+            move_gap: Duration::from_millis(b.move_ms.unwrap_or(120).clamp(20, 1000)),
             frames: b.frames.unwrap_or(2).clamp(1, 5),
         }
     }
@@ -605,46 +663,109 @@ async fn swaf_lock(
     events: &broadcast::Sender<String>,
 ) -> (Vec<f64>, usize, Vec<f64>, usize, f64) {
     use std::sync::atomic::Ordering;
-    // PHASE 1 coarse
-    af_move_near(handle, p.step, (p.n / 2) as usize, p.settle).await;
-    let (coarse_scores, ck) = af_phase(
-        handle, rx, p.cx, p.cy, p.roi_w, p.roi_h, p.frames, p.settle, p.step, p.n, active, events, "coarse",
-    )
-    .await;
-    let coarse_end = coarse_scores.len().saturating_sub(1);
-    af_move_near(handle, p.step, coarse_end.saturating_sub(ck), p.settle).await;
-    if !active.load(Ordering::SeqCst) {
-        let bs = coarse_scores.get(ck).copied().unwrap_or(0.0);
-        return (coarse_scores, ck, Vec::new(), 0, bs);
+    // 큰 widen 이동 후엔 방향 반전 누적 백래시로 인덱스 모델과 실제 위치가 어긋나, 피크를
+    // 보고도 한참 못 앉을 수 있다(실측: coarse 689 봤는데 final 83). 그 경우 더 가까워진
+    // 위치에서 한 번 더 락하면 widen 없이 정밀 수렴(83→780). 최대 2패스.
+    let mut pass = 0u32;
+    loop {
+        pass += 1;
+        // 다중해상도 coarse→fine 캐스케이드. 단일 스텝은 "범위(큰 스텝)"와 "좁은 피크 비앨리어싱
+        // (작은 스텝)"을 동시에 못 잡는다 → 레벨0은 큰 스텝(s0)+widen으로 영역을 가두고, 이후 스텝을
+        // 절반씩 줄이며 직전 ±스텝을 더 촘촘히 재측정·재현착지, fine_step(정밀)까지 줌인.
+        // 범위=레벨0 큰 스텝, 정밀=step1 종착 → 범위/정밀 트레이드오프 해소.
+        let s0 = p.step.max(p.fine_step);
+        // 레벨0: 범위 확보 + widen. 피크가 윈도우 밖(best가 가장자리)이면 best 중심으로 2배 확장,
+        // 조기종료(early=피크 지나 하강)나 중앙 절반 안이면 가둠 완료.
+        let mut n = p.n;
+        // widen 상한 = 1회 doubling. 더 멀면 reconverge 2패스가 더 가까운 위치에서 처리(매 widen이
+        // 전체 재스윕이라 폭주하면 느림 — 시간 묶기). 저콘트라스트 평탄 장면 폭주도 방지.
+        let max_n = p.n.saturating_mul(2);
+        let (coarse_scores, ck) = loop {
+            let (scores, k, early) = measure_and_land(
+                handle, rx, p.cx, p.cy, p.roi_w, p.roi_h, p.frames, p.settle, p.move_gap, s0, n,
+                active, events, "coarse",
+            )
+            .await;
+            let end = scores.len().saturating_sub(1);
+            let margin = (end / 4).max(1);
+            let interior = k >= margin && k + margin <= end;
+            if early || interior || n >= max_n || !active.load(Ordering::SeqCst) {
+                break (scores, k);
+            }
+            n = (n * 2).min(max_n);
+        };
+        if !active.load(Ordering::SeqCst) {
+            let bs = coarse_scores.get(ck).copied().unwrap_or(0.0);
+            return (coarse_scores, ck, Vec::new(), 0, bs);
+        }
+        // 줌인 레벨들: 스텝 절반씩, 직전 ±스텝(±step)을 next 단위로 덮어(m≈4+여유) 재측정·재현착지.
+        // fine_step 도달까지. 각 레벨이 직전 잔차(±step)를 새 해상도로 다시 가두므로 앨리어싱 없음.
+        let mut step = s0;
+        let mut fine_scores = coarse_scores.clone();
+        let mut fk = ck;
+        while step > p.fine_step && active.load(Ordering::SeqCst) {
+            let next = (step / 2).max(p.fine_step);
+            let m = (2 * step as u32 / next as u32).max(4) + 2;
+            let phase = if next == p.fine_step { "fine" } else { "zoom" };
+            let (s2, k2, _) = measure_and_land(
+                handle, rx, p.cx, p.cy, p.roi_w, p.roi_h, p.frames, p.fine_settle, p.move_gap, next,
+                m, active, events, phase,
+            )
+            .await;
+            fine_scores = s2;
+            fk = k2;
+            step = next;
+        }
+        // 최종 위치에서 라플라시안(행렬연산)을 한 번 더 측정 → 백래시 보정 이동 후 실제 도달한
+        // 샤프니스 정상값. 스윕 중 fk 점수는 측정 당시 위치 값이라 복귀 후와 다를 수 있어 재측정.
+        tokio::time::sleep(p.settle).await;
+        let final_score = af_grab(rx, p.cx, p.cy, p.roi_w, p.roi_h, p.frames)
+            .await
+            .unwrap_or_else(|| fine_scores.get(fk).copied().unwrap_or(0.0));
+        // 피크는 봤는데 한참 못 앉았으면(widen 후 드리프트) 더 가까워진 위치에서 1회 더 락.
+        // 평탄 장면은 peak≈final이라 안 걸림.
+        let peak = coarse_scores
+            .iter()
+            .chain(fine_scores.iter())
+            .copied()
+            .fold(0.0_f64, f64::max);
+        if pass >= 2 || final_score >= 0.6 * peak || !active.load(Ordering::SeqCst) {
+            return (coarse_scores, ck, fine_scores, fk, final_score);
+        }
     }
-    // PHASE 2 fine — fine 범위가 coarse 한 격자(±step)를 fine_step 단위로 덮도록 보장.
-    // (안 그러면 coarse 정점이 fine 범위 밖이라 fine이 더 나쁜 위치에 멈춤; 실측 발견)
-    let fine_n = p
-        .fine_n
-        .max(2 * (p.step as u32).div_ceil(p.fine_step.max(1) as u32) + 2);
-    af_move_near(handle, p.fine_step, (fine_n / 2) as usize, p.settle).await;
-    let (fine_scores, fk) = af_phase(
-        handle, rx, p.cx, p.cy, p.roi_w, p.roi_h, p.frames, p.settle, p.fine_step, fine_n, active,
-        events, "fine",
-    )
-    .await;
-    // fine best로 복귀 + 백래시 보정(최종 접근 한 방향=Far)
-    let backlash = 2usize;
-    let fine_end = fine_scores.len().saturating_sub(1);
-    af_move_near(handle, p.fine_step, fine_end.saturating_sub(fk) + backlash, p.settle).await;
-    for _ in 0..backlash {
-        af_drive(handle, p.fine_step).await;
-    }
-    // 최종 위치에서 라플라시안(행렬연산)을 한 번 더 측정 → 백래시 보정 이동 후 실제 도달한
-    // 샤프니스 정상값. 스윕 중 fk 점수는 측정 당시 위치 값이라 복귀 후와 다를 수 있어 재측정.
-    tokio::time::sleep(p.settle).await;
-    let final_score = af_grab(rx, p.cx, p.cy, p.roi_w, p.roi_h, p.frames)
-        .await
-        .unwrap_or_else(|| fine_scores.get(fk).copied().unwrap_or(0.0));
-    (coarse_scores, ck, fine_scores, fk, final_score)
 }
 
-async fn sw_autofocus(State(s): State<AppState>, Json(b): Json<SwAfReq>) -> Response {
+/// 현재 조리개 f-number(예: 1.8). 실패/미지원 시 None.
+async fn current_f_number(handle: i64) -> Option<f64> {
+    let props = tokio::task::spawn_blocking(move || crsdk::properties::get_all(handle))
+        .await
+        .ok()?
+        .ok()?;
+    let raw = props
+        .iter()
+        .find(|p| p.code == crsdk::properties::code::F_NUMBER)?
+        .current;
+    (100..=9999).contains(&raw).then_some(raw as f64 / 100.0)
+}
+
+/// 조리개 기반 ROI 박스 크기. 개방(작은 f, 얕은 DOF)일수록 작게 → 서로 다른 거리 영역이
+/// 섞이지 않아 측정이 깨끗(피크가 선명). f/5.6에서 현행 기본값 roi 0.25에 앵커, f-number에 비례.
+/// (coarse 스텝은 다중해상도 캐스케이드가 알아서 줌인하므로 조리개로 안 건드린다.)
+fn aperture_roi(f: f64) -> f64 {
+    (0.25 * f / 5.6).clamp(0.10, 0.40)
+}
+
+/// 요청이 ROI를 안 줬으면 현재 조리개로 박스 크기를 채운다(개방→작게). 명시값은 존중.
+async fn apply_aperture_defaults(handle: i64, b: &mut SwAfReq) {
+    if b.roi.is_some() || b.roi_w.is_some() || b.roi_h.is_some() {
+        return;
+    }
+    if let Some(f) = current_f_number(handle).await {
+        b.roi = Some(aperture_roi(f));
+    }
+}
+
+async fn sw_autofocus(State(s): State<AppState>, Json(mut b): Json<SwAfReq>) -> Response {
     use std::sync::atomic::Ordering;
     let handle = {
         let g = s.camera.lock().await;
@@ -660,6 +781,7 @@ async fn sw_autofocus(State(s): State<AppState>, Json(b): Json<SwAfReq>) -> Resp
     {
         return (StatusCode::CONFLICT, "autofocus already running").into_response();
     }
+    apply_aperture_defaults(handle, &mut b).await; // 조리개로 step/roi 기본값(개방→작게)
     let p = SwAfParams::from_req(&b);
     let active = s.af_active.clone();
     let events = s.events_tx.clone();
@@ -702,7 +824,7 @@ async fn sw_autofocus(State(s): State<AppState>, Json(b): Json<SwAfReq>) -> Resp
 /// 연속 AF: 초기 합초 후 모니터 루프 — ROI 선명도가 baseline 대비 threshold 미만으로
 /// 떨어지면(피사체 이동/카메라 흔들림) 재합초. /cancel(af_active=false)로 정지.
 /// 즉시 "started" 반환하고 백그라운드 진행, 상태는 /events SSE(af_continuous).
-async fn sw_autofocus_continuous(State(s): State<AppState>, Json(b): Json<SwAfReq>) -> Response {
+async fn sw_autofocus_continuous(State(s): State<AppState>, Json(mut b): Json<SwAfReq>) -> Response {
     use std::sync::atomic::Ordering;
     let handle = {
         let g = s.camera.lock().await;
@@ -717,6 +839,7 @@ async fn sw_autofocus_continuous(State(s): State<AppState>, Json(b): Json<SwAfRe
     {
         return (StatusCode::CONFLICT, "autofocus already running").into_response();
     }
+    apply_aperture_defaults(handle, &mut b).await; // 조리개로 step/roi 기본값(개방→작게)
     let p = SwAfParams::from_req(&b);
     let threshold = b.threshold.unwrap_or(0.7).clamp(0.3, 0.95);
     let check = Duration::from_millis(b.check_ms.unwrap_or(600).clamp(150, 5000));
