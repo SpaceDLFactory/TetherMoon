@@ -109,6 +109,66 @@ fn sdk_session() -> &'static SdkSession {
 struct CameraCell(Camera<'static>, String, String); // (camera, model명, lens_model)
 unsafe impl Send for CameraCell {}
 
+// ── 검출기(RT-DETR CoreML, 옵셔널) ───────────────────────────────────────
+/// TETHERMOON_DETECTOR_MODEL(.mlpackage 경로) 환경변수로 1회 로드. 없거나 실패 시 None.
+#[cfg(feature = "detector")]
+fn load_detector() -> Option<Arc<detector::Detector>> {
+    let path = std::env::var("TETHERMOON_DETECTOR_MODEL").ok()?;
+    match detector::Detector::new(&path) {
+        Some(d) => {
+            tracing::info!("detector loaded: {path}");
+            Some(Arc::new(d))
+        }
+        None => {
+            tracing::warn!("detector model load failed: {path}");
+            None
+        }
+    }
+}
+
+/// 현재 라이브뷰 프레임에서 RT-DETR 검출 → 박스 JSON(추적AF의 검출 소스).
+/// bbox는 라이브뷰 픽셀 좌표(x0,y0,x1,y1), img_w/h와 함께 반환 → UI가 정규화해 오버레이.
+#[cfg(feature = "detector")]
+async fn detect(State(s): State<AppState>) -> Response {
+    let Some(det) = s.detector.clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "detector not loaded (set TETHERMOON_DETECTOR_MODEL)",
+        )
+            .into_response();
+    };
+    let mut rx = s.lv_tx.subscribe();
+    while rx.try_recv().is_ok() {} // 최신 프레임
+    let frame = match tokio::time::timeout(Duration::from_millis(800), rx.recv()).await {
+        Ok(Ok(f)) => f,
+        _ => return (StatusCode::PRECONDITION_REQUIRED, "live view not running").into_response(),
+    };
+    let res = tokio::task::spawn_blocking(
+        move || -> Result<(i32, i32, Vec<detector::Detection>), String> {
+            let mut dec = jpeg_decoder::Decoder::new(std::io::Cursor::new(&frame[..]));
+            let px = dec.decode().map_err(|e| format!("decode: {e}"))?;
+            let info = dec.info().ok_or("no image info")?;
+            if info.pixel_format != jpeg_decoder::PixelFormat::RGB24 {
+                return Err(format!("lv not RGB24: {:?}", info.pixel_format));
+            }
+            let (w, h) = (info.width as i32, info.height as i32);
+            Ok((w, h, det.infer(&px, w, h, 0.4, 50)))
+        },
+    )
+    .await;
+    match res {
+        Ok(Ok((w, h, dets))) => {
+            let arr: Vec<_> = dets
+                .iter()
+                .map(|d| serde_json::json!({"class": d.class, "score": d.score, "bbox": d.bbox}))
+                .collect();
+            Json(serde_json::json!({"img_w": w, "img_h": h, "detections": arr})).into_response()
+        }
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("task: {e}")).into_response(),
+    }
+}
+
 // ── App state ──────────────────────────────────────────────────────────
 #[derive(Clone)]
 struct AppState {
@@ -122,6 +182,8 @@ struct AppState {
     lv_running: Arc<std::sync::Mutex<bool>>, // LiveView 프로듀서 가동 여부 (시작/종료 race 방지용 락)
     af_active: Arc<std::sync::atomic::AtomicBool>, // SW-AF 스윕 진행중 (단일 실행 + 취소 신호 겸용)
     me_active: Arc<std::sync::atomic::AtomicBool>, // 다중노출 시퀀스 진행중 (중복 트리거 방지)
+    #[cfg(feature = "detector")]
+    detector: Option<Arc<detector::Detector>>, // RT-DETR CoreML(추적AF, 옵셔널). 모델 미로드시 None
 }
 
 // ── /api/status DTO ─────────────────────────────────────────────────────
@@ -1964,6 +2026,8 @@ async fn main() {
         lv_running: Arc::new(std::sync::Mutex::new(false)),
         af_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         me_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        #[cfg(feature = "detector")]
+        detector: load_detector(),
     };
 
     // 자동 (재)연결 루프: 미연결 상태면 3초마다 connect 시도.
@@ -2021,8 +2085,10 @@ async fn main() {
         .route("/api/_debug/enum", get(debug_enum))
         .route("/events", get(events))
         .route("/lv", get(liveview))
-        .nest_service("/web", ServeDir::new(web_dir()))
-        .with_state(state);
+        .nest_service("/web", ServeDir::new(web_dir()));
+    #[cfg(feature = "detector")]
+    let app = app.route("/api/detect", post(detect)); // RT-DETR 검출(추적AF, 옵셔널)
+    let app = app.with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080")
         .await

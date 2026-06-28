@@ -217,6 +217,7 @@ dependencies = [
  "anyhow",
  "axum",
  "crsdk",
+ "detector",
  "jpeg-decoder",
  "jpeg-encoder",
  "serde",
@@ -237,6 +238,13 @@ dependencies = [
  "dispatch2",
  "nix",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "detector"
+version = "0.1.0"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

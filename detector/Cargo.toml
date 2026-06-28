@@ -1,0 +1,8 @@
+[package]
+name = "detector"
+version = "0.1.0"
+edition = "2021"
+description = "RT-DETR CoreML detector (Obj-C++/CoreML) — TetherMoon 추적AF 옵셔널 모듈, macOS 전용"
+
+[build-dependencies]
+cc = "1"

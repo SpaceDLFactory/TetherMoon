@@ -21,3 +21,8 @@ tracing-subscriber = "0.3"
 anyhow     = "1"
 jpeg-decoder = "0.3"   # SW-AF: 라이브뷰 JPEG → 그레이스케일 선명도 측정
 jpeg-encoder = "0.6"   # 스태킹/다중노출: 합성 결과 RGB → JPEG 인코드
+detector   = { path = "../detector", optional = true }  # RT-DETR CoreML(추적AF, macOS 옵셔널)
+
+[features]
+# 기본 빌드엔 미포함(무거운 CoreML 모델/런타임). `--features detector`로 활성.
+detector = ["dep:detector"]
