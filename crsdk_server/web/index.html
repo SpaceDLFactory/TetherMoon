@@ -104,6 +104,20 @@
     border: 1.5px dashed #ffcc33; box-shadow: 0 0 0 1px rgba(0,0,0,0.6);
     pointer-events: none; display: none; z-index: 50;
   }
+  /* 검출/추적 박스 오버레이 (RT-DETR) */
+  .det-overlay { position: absolute; inset: 0; z-index: 49; pointer-events: none; display: none; }
+  .det-box {
+    position: absolute; box-sizing: border-box;
+    border: 1.5px solid rgba(74,158,255,0.9); border-radius: 2px;
+    pointer-events: auto; cursor: pointer; transition: border-color .1s;
+  }
+  .det-box:hover { border-color: #fff; }
+  .det-box .det-tag {
+    position: absolute; left: 0; top: -16px; font-size: 10px; line-height: 14px;
+    padding: 0 4px; background: rgba(74,158,255,0.9); color: #fff; white-space: nowrap; border-radius: 2px;
+  }
+  .det-box.target { border-color: #ffcc33; border-width: 2px; }
+  .det-box.target .det-tag { background: #ffcc33; color: #000; }
   .swaf-cfg { margin-top: 6px; font-size: 12px; }
   .swaf-cfg summary { cursor: pointer; color: var(--fg-mute); padding: 2px 0; user-select: none; }
   .swaf-cfg .nf-slider { margin-top: 6px; }
@@ -437,6 +451,7 @@
     <canvas class="loupe-canvas" id="loupeCanvas"></canvas>
     <div class="af-marker" id="afMarker"></div>
     <div class="swaf-roi" id="swafRoi"></div>
+    <div class="det-overlay" id="detOverlay"></div>
     <div class="lv-frame"></div>
     <div class="lv-thirds"></div>
     <svg class="lv-gridsvg" id="gridSvg" viewBox="0 0 100 100" preserveAspectRatio="none">
@@ -589,6 +604,13 @@
         </div>
         <label class="swaf-cont"><input type="checkbox" id="swafContIn"> <span data-i18n="swaf.continuous">Continuous (track focus)</span></label>
       </details>
+      <div class="btn-row" style="grid-template-columns:1fr 1fr;">
+        <button class="btn" id="detBtn" type="button">Detect ▶</button>
+        <button class="btn" id="trackAfBtn" type="button" disabled>Track AF</button>
+      </div>
+      <div class="row" id="detStatus" style="margin-top:4px;color:var(--fg-mute);font-size:10px;">
+        <span>RT-DETR 검출 → 박스 클릭=추적 대상 → Track AF(연속). (detector 빌드 필요)</span>
+      </div>
       <div class="btn-row" style="grid-template-columns:1fr 1fr;">
         <button class="btn" id="peakBtn" type="button" data-i18n="btn.peakoff">Peaking OFF</button>
         <button class="btn" id="afCenterBtn" type="button" data-i18n="btn.afcenter">AF center</button>
@@ -1680,6 +1702,65 @@
     document.addEventListener('pointermove', swafDragMove);
     document.addEventListener('pointerup', swafDragEnd);
     e.preventDefault();
+  });
+
+  // ── 추적 AF (RT-DETR 검출 → 박스 선택 → 추적 → SW-AF ROI) ──────────────
+  const COCO = ['person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light','fire hydrant','stop sign','parking meter','bench','bird','cat','dog','horse','sheep','cow','elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie','suitcase','frisbee','skis','snowboard','sports ball','kite','baseball bat','baseball glove','skateboard','surfboard','tennis racket','bottle','wine glass','cup','fork','knife','spoon','bowl','banana','apple','sandwich','orange','broccoli','carrot','hot dog','pizza','donut','cake','chair','couch','potted plant','bed','dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone','microwave','oven','toaster','sink','refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush'];
+  const detOverlay = document.getElementById('detOverlay');
+  const detBtn = document.getElementById('detBtn');
+  const trackAfBtn = document.getElementById('trackAfBtn');
+  const detStatusEl = document.querySelector('#detStatus span');
+  let detTimer = null, detTarget = null, detImg = { w: 1024, h: 680 };
+  const detSet = (t) => { if (detStatusEl) detStatusEl.textContent = t; };
+  // 검출 박스(raw lv 픽셀) → 정규화 중심/크기. (회전 off 가정 v1)
+  const detCenter = (b) => ({ cx: (b[0]+b[2])/2/detImg.w, cy: (b[1]+b[3])/2/detImg.h,
+                              w: (b[2]-b[0])/detImg.w, h: (b[3]-b[1])/detImg.h });
+  const drawDets = (dets) => {
+    detOverlay.innerHTML = ''; detOverlay.style.display = 'block';
+    const r = lvWrap.getBoundingClientRect();
+    dets.forEach(d => {
+      const c = detCenter(d.bbox);
+      const el = document.createElement('div'); el.className = 'det-box';
+      el.style.left = ((c.cx - c.w/2) * r.width) + 'px';
+      el.style.top  = ((c.cy - c.h/2) * r.height) + 'px';
+      el.style.width = (c.w * r.width) + 'px'; el.style.height = (c.h * r.height) + 'px';
+      el.innerHTML = `<span class="det-tag">${COCO[d.class] || d.class} ${(d.score*100)|0}%</span>`;
+      if (detTarget && Math.hypot(c.cx-detTarget.cx, c.cy-detTarget.cy) < 0.06) el.classList.add('target');
+      el.addEventListener('click', (e) => { e.stopPropagation(); detTarget = c; trackAfBtn.disabled = false; drawDets(dets); });
+      detOverlay.appendChild(el);
+    });
+  };
+  const detOnce = async () => {
+    try {
+      const res = await fetch('/api/detect', { method: 'POST' });
+      if (!res.ok) { detSet('검출 불가: ' + (await res.text())); return; }
+      const j = await res.json();
+      detImg = { w: j.img_w, h: j.img_h };
+      // 추적: 직전 대상에 가장 가까운 검출로 갱신(충분히 가까울 때만)
+      if (detTarget && j.detections.length) {
+        let best = null, bd = 1e9;
+        for (const d of j.detections) { const c = detCenter(d.bbox); const dd = Math.hypot(c.cx-detTarget.cx, c.cy-detTarget.cy); if (dd < bd) { bd = dd; best = c; } }
+        if (best && bd < 0.15) detTarget = best;
+      }
+      drawDets(j.detections);
+      detSet(`검출 ${j.detections.length}개` + (detTarget ? ' · 추적중' : ''));
+    } catch (e) { detSet('검출 실패'); }
+  };
+  detBtn.addEventListener('click', () => {
+    if (detTimer) { clearInterval(detTimer); detTimer = null; detOverlay.style.display = 'none'; detOverlay.innerHTML = ''; detBtn.textContent = 'Detect ▶'; detBtn.classList.remove('active'); detSet('정지'); return; }
+    detBtn.textContent = 'Detect ■'; detBtn.classList.add('active');
+    detOnce(); detTimer = setInterval(detOnce, 800);
+  });
+  trackAfBtn.addEventListener('click', () => {
+    if (!detTarget) return;
+    const cfg = swafCfg();
+    cfg.roi_w = Math.min(0.5, Math.max(0.1, detTarget.w));
+    cfg.roi_h = Math.min(0.5, Math.max(0.1, detTarget.h));
+    delete cfg.roi;
+    fetch('/api/sw_autofocus', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ x: detTarget.cx, y: detTarget.cy, ...cfg }) })
+      .then(r => r.ok ? toast('추적 AF', 'ok') : r.text().then(t => toast('AF: ' + t, 'err')))
+      .catch(() => toast('AF 실패', 'err'));
   });
 
   // ── AF D-pad 너지 + 방향키 (영역 미세 이동) ──────────────────────────
