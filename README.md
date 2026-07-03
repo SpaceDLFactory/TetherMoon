@@ -79,6 +79,11 @@ The rest of this README is for **building from source**.
   measuring Laplacian-variance sharpness in that ROI, with backlash-robust landing,
   a live ROI box, and real-time progress. Works on bodies (like the A7C) that lack
   an absolute-focus API
+- **Tracking AF** *(experimental, macOS, optional)* — an optional detector module
+  (`--features detector`) runs an **RT-DETR** object detector on the live view via
+  **CoreML** (Apple Neural Engine, ~real-time). Pick a detected box on the overlay and
+  it tracks that object, feeding the centroid to Software AF as the focus ROI. Off by
+  default — the base build has no ML dependency
 - **Capture** — single, burst (press-hold), movie record, cancel
 - **Multiple exposure** — software multi-exposure (the A7C has no in-body version):
   shoot N frames and blend them server-side into one image — *average* (classic),
