@@ -1717,6 +1717,9 @@
                               w: (b[2]-b[0])/detImg.w, h: (b[3]-b[1])/detImg.h });
   const drawDets = (dets) => {
     detOverlay.innerHTML = ''; detOverlay.style.display = 'block';
+    // 박스는 raw(미회전) 정규화 좌표로 배치하고, 오버레이에 lvImg와 동일한 회전·스케일 변환을
+    // 걸어 통째로 회전 → 화면 회전을 그대로 따라감.
+    detOverlay.style.transform = lvImg.style.transform || '';
     const r = lvWrap.getBoundingClientRect();
     dets.forEach(d => {
       const c = detCenter(d.bbox);
@@ -1802,6 +1805,7 @@
     if (lvThirds) lvThirds.style.transform = t; // 그리드도 라이브뷰와 함께 회전
     if (gridSvg) gridSvg.style.transform = t;    // 소실점/대각선 그리드도 동반 회전
     if (loupeCanvas) loupeCanvas.style.transform = t; // 루페도 동일 회전
+    if (detOverlay) detOverlay.style.transform = t;    // 검출 박스 오버레이도 동반 회전
   };
   rotBtn.addEventListener('click', () => {
     lvRot = (lvRot + 90) % 360;
