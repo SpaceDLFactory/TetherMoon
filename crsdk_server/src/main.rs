@@ -931,6 +931,7 @@ async fn sw_autofocus_continuous(State(s): State<AppState>, Json(mut b): Json<Sw
     let cancel = s.af_cancel.clone();
     let events = s.events_tx.clone();
     let lv_tx = s.lv_tx.clone();
+    let cam = s.camera.clone();
 
     tokio::spawn(async move {
         let _guard = guard; // 태스크 종료(정상/조기 return) 시 af_active 해제
@@ -950,6 +951,11 @@ async fn sw_autofocus_continuous(State(s): State<AppState>, Json(mut b): Json<Sw
         while !cancel.load(Ordering::SeqCst) {
             tokio::time::sleep(check).await;
             if cancel.load(Ordering::SeqCst) {
+                break;
+            }
+            // 카메라가 끊기면(스테일 핸들) 스윕이 무의미 → 종료해 af_active 가드를 해제한다
+            // (그렇지 않으면 무한 모니터가 재연결 후 재시작을 막는다).
+            if cam.lock().await.as_ref().map(|c| c.0.device_handle()) != Some(handle) {
                 break;
             }
             let cur = af_grab(&mut rx, p.cx, p.cy, p.roi_w, p.roi_h, p.frames)
