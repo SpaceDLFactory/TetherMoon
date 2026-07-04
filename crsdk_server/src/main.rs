@@ -184,6 +184,7 @@ struct AppState {
     af_active: Arc<std::sync::atomic::AtomicBool>, // SW-AF 스윕 진행중 (단일 실행 가드, 소유자만 해제)
     af_cancel: Arc<std::sync::atomic::AtomicBool>, // SW-AF 취소 신호 (cancel이 set, 스윕이 관측)
     me_active: Arc<std::sync::atomic::AtomicBool>, // 다중노출 시퀀스 진행중 (중복 트리거 방지)
+    connecting: Arc<std::sync::atomic::AtomicBool>, // 연결 시도 진행중 (동시 connect 직렬화)
     #[cfg(feature = "detector")]
     detector: Option<Arc<detector::Detector>>, // RT-DETR CoreML(추적AF, 옵셔널). 모델 미로드시 None
 }
@@ -226,8 +227,19 @@ async fn status(State(s): State<AppState>) -> Json<Status> {
 /// 연결 코어 — HTTP 핸들러와 부팅 태스크가 공유한다 (핸들러 시그니처에 결합되지 않도록).
 /// Ok(()) = 연결 완료(또는 이미 연결됨), Err(msg) = 실패 사유.
 async fn connect_core(s: &AppState) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
     if s.camera.lock().await.is_some() {
         return Ok(()); // 이미 연결됨
+    }
+    // 동시 connect 방지: 오토리커넥트 루프(3s)와 수동 /connect가 겹치면 SDK에 이중 연결
+    // 시도가 발생한다. 진행 중이면 스킵하고, 가드가 모든 종료 경로에서 플래그를 해제한다.
+    if s.connecting.swap(true, Ordering::SeqCst) {
+        return Ok(()); // 다른 연결 시도가 진행 중 — 그쪽이 완료한다.
+    }
+    let _cg = RunGuard(s.connecting.clone());
+    // 가드 획득 직전에 다른 시도가 막 연결했을 수 있으니 재확인.
+    if s.camera.lock().await.is_some() {
+        return Ok(());
     }
 
     // 원하는 저장 경로를 blocking 진입 전에 읽어둔다 (tokio Mutex는 blocking에서 await 불가).
@@ -1701,14 +1713,14 @@ fn lv_producer(handle: i64, lv_tx: broadcast::Sender<Arc<Vec<u8>>>, running: Arc
         match LiveViewStream::new(handle) {
             Ok(s) => { lv = Some(s); break; }
             Err(SdkError::LiveViewUnavailable) => std::thread::sleep(Duration::from_millis(200)),
-            Err(_) => { *running.lock().unwrap() = false; return; }
+            Err(_) => { *running.lock().unwrap_or_else(|e| e.into_inner()) = false; return; }
         }
     }
     let lv = match lv {
         Some(s) => s,
         None => {
             tracing::warn!("lv: LiveViewStream unavailable after retries");
-            *running.lock().unwrap() = false;
+            *running.lock().unwrap_or_else(|e| e.into_inner()) = false;
             return;
         }
     };
@@ -1724,7 +1736,7 @@ fn lv_producer(handle: i64, lv_tx: broadcast::Sender<Arc<Vec<u8>>>, running: Arc
             Ok(_) => std::thread::sleep(Duration::from_millis(16)), // 아직 새 프레임 없음
             Err(e) => {
                 tracing::warn!("lv: fetch error after {sent} frames: {e:?}");
-                *running.lock().unwrap() = false;
+                *running.lock().unwrap_or_else(|e| e.into_inner()) = false;
                 break;
             }
         }
@@ -1749,7 +1761,7 @@ async fn liveview(State(s): State<AppState>) -> Response {
 
     // 프로듀서 미가동이면 시작 (단일 프로듀서). 락으로 종료 판정과 직렬화.
     {
-        let mut running = s.lv_running.lock().unwrap();
+        let mut running = s.lv_running.lock().unwrap_or_else(|e| e.into_inner());
         if !*running {
             *running = true;
             let lv_tx = s.lv_tx.clone();
@@ -2052,6 +2064,7 @@ async fn main() {
         af_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         af_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         me_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        connecting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         #[cfg(feature = "detector")]
         detector: load_detector(),
     };
