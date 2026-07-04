@@ -177,10 +177,12 @@ struct AppState {
     events_tx: broadcast::Sender<String>, // JSON으로 직렬화된 CameraEvent fan-out
     last_image: Arc<Mutex<Option<String>>>, // 마지막 PC 저장 파일 경로 (미리보기)
     bulb_active: Arc<std::sync::atomic::AtomicBool>, // 벌브 타이머 노출 진행중 (중복 트리거 방지)
-    interval_active: Arc<std::sync::atomic::AtomicBool>, // 인터벌 촬영 진행중 (취소 신호 겸용)
+    interval_active: Arc<std::sync::atomic::AtomicBool>, // 인터벌 촬영 진행중 (단일 실행 가드, 소유자만 해제)
+    interval_cancel: Arc<std::sync::atomic::AtomicBool>, // 인터벌 취소 신호 (stop이 set, 루프가 관측)
     lv_tx: broadcast::Sender<Arc<Vec<u8>>>, // LiveView 프레임 fan-out (다중 클라이언트)
     lv_running: Arc<std::sync::Mutex<bool>>, // LiveView 프로듀서 가동 여부 (시작/종료 race 방지용 락)
-    af_active: Arc<std::sync::atomic::AtomicBool>, // SW-AF 스윕 진행중 (단일 실행 + 취소 신호 겸용)
+    af_active: Arc<std::sync::atomic::AtomicBool>, // SW-AF 스윕 진행중 (단일 실행 가드, 소유자만 해제)
+    af_cancel: Arc<std::sync::atomic::AtomicBool>, // SW-AF 취소 신호 (cancel이 set, 스윕이 관측)
     me_active: Arc<std::sync::atomic::AtomicBool>, // 다중노출 시퀀스 진행중 (중복 트리거 방지)
     #[cfg(feature = "detector")]
     detector: Option<Arc<detector::Detector>>, // RT-DETR CoreML(추적AF, 옵셔널). 모델 미로드시 None
@@ -548,7 +550,7 @@ async fn af_grab(
 
 /// 현재 위치에서 Far(+step)로 n번 이동하며 측정. (scores, best_index, bracketed) 반환.
 /// bracketed=true면 피크를 지나 명확히 하강해 **조기 종료**(남은 윈도우 측정 생략 = 속도).
-/// active=false면 즉시 중단(부분 scores). 끝나면 focus는 마지막 측정 지점.
+/// cancel=true면 즉시 중단(부분 scores). 끝나면 focus는 마지막 측정 지점.
 #[allow(clippy::too_many_arguments)]
 async fn af_phase(
     handle: i64,
@@ -561,7 +563,7 @@ async fn af_phase(
     settle: Duration,
     step: i32,
     n: u32,
-    active: &std::sync::atomic::AtomicBool,
+    cancel: &std::sync::atomic::AtomicBool,
     events: &broadcast::Sender<String>,
     phase: &str,
 ) -> (Vec<f64>, usize, bool) {
@@ -572,7 +574,7 @@ async fn af_phase(
     let mut drops = 0u32; // best 대비 급락 연속 횟수
     let mut bracketed = false;
     for i in 0..=n as usize {
-        if !active.load(Ordering::SeqCst) {
+        if cancel.load(Ordering::SeqCst) {
             break;
         }
         let sc = af_grab(rx, cx, cy, roi_w, roi_h, frames).await.unwrap_or(0.0);
@@ -631,7 +633,7 @@ async fn measure_and_land(
     move_gap: Duration,
     step: i32,
     m: u32,
-    active: &std::sync::atomic::AtomicBool,
+    cancel: &std::sync::atomic::AtomicBool,
     events: &broadcast::Sender<String>,
     phase: &str,
 ) -> (Vec<f64>, usize, bool) {
@@ -642,7 +644,7 @@ async fn measure_and_land(
     af_move_near(handle, step, (m / 2) as usize, move_gap).await;
     // 2) +방향 측정 스윕 → pk. (focus는 +방향 끝. bracketed면 조기 종료.)
     let (scores, pk, bracketed) = af_phase(
-        handle, rx, cx, cy, roi_w, roi_h, frames, settle, step, m, active, events, phase,
+        handle, rx, cx, cy, roi_w, roi_h, frames, settle, step, m, cancel, events, phase,
     )
     .await;
     // 3) 측정과 동일 기하 재현 착지: 스윕 시작점으로 −복귀(= +스윕한 만큼) 후 +방향 pk스텝.
@@ -719,12 +721,12 @@ impl SwAfParams {
 }
 
 /// 합초 1회(coarse→fine + 백래시 보정). (coarse_scores, ck, fine_scores, fk, best_score) 반환.
-/// active=false면 coarse 후 조기 종료(이미 coarse best로 복귀). 진행률은 events로 emit.
+/// cancel=true면 coarse 후 조기 종료(이미 coarse best로 복귀). 진행률은 events로 emit.
 async fn swaf_lock(
     handle: i64,
     rx: &mut broadcast::Receiver<Arc<Vec<u8>>>,
     p: &SwAfParams,
-    active: &std::sync::atomic::AtomicBool,
+    cancel: &std::sync::atomic::AtomicBool,
     events: &broadcast::Sender<String>,
 ) -> (Vec<f64>, usize, Vec<f64>, usize, f64) {
     use std::sync::atomic::Ordering;
@@ -748,18 +750,18 @@ async fn swaf_lock(
         let (coarse_scores, ck) = loop {
             let (scores, k, early) = measure_and_land(
                 handle, rx, p.cx, p.cy, p.roi_w, p.roi_h, p.frames, p.settle, p.move_gap, s0, n,
-                active, events, "coarse",
+                cancel, events, "coarse",
             )
             .await;
             let end = scores.len().saturating_sub(1);
             let margin = (end / 4).max(1);
             let interior = k >= margin && k + margin <= end;
-            if early || interior || n >= max_n || !active.load(Ordering::SeqCst) {
+            if early || interior || n >= max_n || cancel.load(Ordering::SeqCst) {
                 break (scores, k);
             }
             n = (n * 2).min(max_n);
         };
-        if !active.load(Ordering::SeqCst) {
+        if cancel.load(Ordering::SeqCst) {
             let bs = coarse_scores.get(ck).copied().unwrap_or(0.0);
             return (coarse_scores, ck, Vec::new(), 0, bs);
         }
@@ -768,13 +770,13 @@ async fn swaf_lock(
         let mut step = s0;
         let mut fine_scores = coarse_scores.clone();
         let mut fk = ck;
-        while step > p.fine_step && active.load(Ordering::SeqCst) {
+        while step > p.fine_step && !cancel.load(Ordering::SeqCst) {
             let next = (step / 2).max(p.fine_step);
             let m = (2 * step as u32 / next as u32).max(4) + 2;
             let phase = if next == p.fine_step { "fine" } else { "zoom" };
             let (s2, k2, _) = measure_and_land(
                 handle, rx, p.cx, p.cy, p.roi_w, p.roi_h, p.frames, p.fine_settle, p.move_gap, next,
-                m, active, events, phase,
+                m, cancel, events, phase,
             )
             .await;
             fine_scores = s2;
@@ -794,7 +796,7 @@ async fn swaf_lock(
             .chain(fine_scores.iter())
             .copied()
             .fold(0.0_f64, f64::max);
-        if pass >= 2 || final_score >= 0.6 * peak || !active.load(Ordering::SeqCst) {
+        if pass >= 2 || final_score >= 0.6 * peak || cancel.load(Ordering::SeqCst) {
             return (coarse_scores, ck, fine_scores, fk, final_score);
         }
     }
@@ -846,21 +848,23 @@ async fn sw_autofocus(State(s): State<AppState>, Json(mut b): Json<SwAfReq>) -> 
     {
         return (StatusCode::CONFLICT, "autofocus already running").into_response();
     }
+    // af_active는 이 가드가 모든 종료(정상/에러 return/future 드롭)에서 해제 — 소유자만 해제.
+    // 취소는 별도 af_cancel 신호로만 처리하고, 이전 런의 잔여 취소값은 여기서 초기화한다.
+    let _af_guard = RunGuard(s.af_active.clone());
+    s.af_cancel.store(false, Ordering::SeqCst);
     apply_aperture_defaults(handle, &mut b).await; // 조리개로 step/roi 기본값(개방→작게)
     let p = SwAfParams::from_req(&b);
-    let active = s.af_active.clone();
+    let cancel = s.af_cancel.clone();
     let events = s.events_tx.clone();
     let mut rx = s.lv_tx.subscribe();
 
     // 라이브뷰 가동 확인: 첫 프레임이 안 오면 중단.
     if af_grab(&mut rx, p.cx, p.cy, p.roi_w, p.roi_h, 1).await.is_none() {
-        active.store(false, Ordering::SeqCst);
         return (StatusCode::PRECONDITION_REQUIRED, "live view not running").into_response();
     }
 
     let (coarse_scores, ck, fine_scores, fk, best_score) =
-        swaf_lock(handle, &mut rx, &p, &active, &events).await;
-    active.store(false, Ordering::SeqCst);
+        swaf_lock(handle, &mut rx, &p, &cancel, &events).await;
 
     // fine까지 갔으면 fine 기준, coarse에서 취소됐으면 coarse 기준.
     let (best_index, points) = if fine_scores.is_empty() {
@@ -887,7 +891,7 @@ async fn sw_autofocus(State(s): State<AppState>, Json(mut b): Json<SwAfReq>) -> 
 }
 
 /// 연속 AF: 초기 합초 후 모니터 루프 — ROI 선명도가 baseline 대비 threshold 미만으로
-/// 떨어지면(피사체 이동/카메라 흔들림) 재합초. /cancel(af_active=false)로 정지.
+/// 떨어지면(피사체 이동/카메라 흔들림) 재합초. /cancel(af_cancel=true)로 정지.
 /// 즉시 "started" 반환하고 백그라운드 진행, 상태는 /events SSE(af_continuous).
 async fn sw_autofocus_continuous(State(s): State<AppState>, Json(mut b): Json<SwAfReq>) -> Response {
     use std::sync::atomic::Ordering;
@@ -904,32 +908,36 @@ async fn sw_autofocus_continuous(State(s): State<AppState>, Json(mut b): Json<Sw
     {
         return (StatusCode::CONFLICT, "autofocus already running").into_response();
     }
+    // af_active 소유권은 spawn 태스크로 옮기는 가드가 태스크 종료 시 해제(소유자만 해제).
+    // 취소는 af_cancel 신호로만; 이전 런 잔여 취소값 초기화.
+    s.af_cancel.store(false, Ordering::SeqCst);
+    let guard = RunGuard(s.af_active.clone());
     apply_aperture_defaults(handle, &mut b).await; // 조리개로 step/roi 기본값(개방→작게)
     let p = SwAfParams::from_req(&b);
     let threshold = b.threshold.unwrap_or(0.7).clamp(0.3, 0.95);
     let check = Duration::from_millis(b.check_ms.unwrap_or(600).clamp(150, 5000));
-    let active = s.af_active.clone();
+    let cancel = s.af_cancel.clone();
     let events = s.events_tx.clone();
     let lv_tx = s.lv_tx.clone();
 
     tokio::spawn(async move {
+        let _guard = guard; // 태스크 종료(정상/조기 return) 시 af_active 해제
         let mut rx = lv_tx.subscribe();
         if af_grab(&mut rx, p.cx, p.cy, p.roi_w, p.roi_h, 1).await.is_none() {
             let _ = events.send(
                 r#"{"type":"af_continuous","state":"error","reason":"no_liveview"}"#.to_string(),
             );
-            active.store(false, Ordering::SeqCst);
             return;
         }
         // 초기 합초
-        let (_, _, _, _, mut baseline) = swaf_lock(handle, &mut rx, &p, &active, &events).await;
+        let (_, _, _, _, mut baseline) = swaf_lock(handle, &mut rx, &p, &cancel, &events).await;
         let _ = events.send(format!(
             r#"{{"type":"af_continuous","state":"locked","score":{baseline:.0}}}"#
         ));
         // 모니터 루프
-        while active.load(Ordering::SeqCst) {
+        while !cancel.load(Ordering::SeqCst) {
             tokio::time::sleep(check).await;
-            if !active.load(Ordering::SeqCst) {
+            if cancel.load(Ordering::SeqCst) {
                 break;
             }
             let cur = af_grab(&mut rx, p.cx, p.cy, p.roi_w, p.roi_h, p.frames)
@@ -939,7 +947,7 @@ async fn sw_autofocus_continuous(State(s): State<AppState>, Json(mut b): Json<Sw
                 let _ = events.send(format!(
                     r#"{{"type":"af_continuous","state":"refocus","score":{cur:.0}}}"#
                 ));
-                let (_, _, _, _, nb) = swaf_lock(handle, &mut rx, &p, &active, &events).await;
+                let (_, _, _, _, nb) = swaf_lock(handle, &mut rx, &p, &cancel, &events).await;
                 baseline = nb;
                 let _ = events.send(format!(
                     r#"{{"type":"af_continuous","state":"locked","score":{baseline:.0}}}"#
@@ -950,7 +958,6 @@ async fn sw_autofocus_continuous(State(s): State<AppState>, Json(mut b): Json<Sw
                 ));
             }
         }
-        active.store(false, Ordering::SeqCst);
         let _ = events.send(r#"{"type":"af_continuous","state":"stopped"}"#.to_string());
         tracing::info!("sw-af continuous: stopped");
     });
@@ -958,8 +965,9 @@ async fn sw_autofocus_continuous(State(s): State<AppState>, Json(mut b): Json<Sw
 }
 
 async fn sw_autofocus_cancel(State(s): State<AppState>) -> impl IntoResponse {
-    s.af_active
-        .store(false, std::sync::atomic::Ordering::SeqCst);
+    // 실행 가드(af_active)는 소유 태스크가 해제한다. 여기선 취소 신호만 올린다.
+    s.af_cancel
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     (StatusCode::OK, "cancel")
 }
 
@@ -1299,7 +1307,7 @@ async fn bulb(State(s): State<AppState>, Json(b): Json<BulbReq>) -> impl IntoRes
 }
 
 // ── 인터벌(타임랩스): 소프트웨어로 N초마다 M장 촬영 (A7C는 내장 인터벌 설정 미노출) ──
-// interval_active를 취소 신호로 겸용. 대기는 1초 단위로 쪼개 /stop에 ~1s 내 반응.
+// interval_cancel로 취소 신호. 대기는 1초 단위로 쪼개 /stop에 ~1s 내 반응.
 #[derive(Deserialize)]
 struct IntervalReq { interval_sec: u64, count: u32 }
 
@@ -1320,10 +1328,14 @@ async fn interval_start(State(s): State<AppState>, Json(b): Json<IntervalReq>) -
     {
         return (StatusCode::CONFLICT, "interval already running".to_string());
     }
-    let active = s.interval_active.clone();
+    // 실행 가드는 태스크로 이동해 종료 시 interval_active 해제(소유자만). 취소는 interval_cancel 신호.
+    s.interval_cancel.store(false, Ordering::SeqCst);
+    let guard = RunGuard(s.interval_active.clone());
+    let cancel = s.interval_cancel.clone();
     tokio::spawn(async move {
+        let _guard = guard; // 태스크 종료 시 interval_active 해제
         for i in 0..count {
-            if !active.load(Ordering::SeqCst) { break; } // 취소
+            if cancel.load(Ordering::SeqCst) { break; } // 취소
             match tokio::task::spawn_blocking(move || capture_one(handle)).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => tracing::warn!("interval shot {i} failed: {e:?}"),
@@ -1331,19 +1343,19 @@ async fn interval_start(State(s): State<AppState>, Json(b): Json<IntervalReq>) -
             }
             if i + 1 < count {
                 for _ in 0..interval {
-                    if !active.load(Ordering::SeqCst) { break; }
+                    if cancel.load(Ordering::SeqCst) { break; }
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
             }
         }
-        active.store(false, Ordering::SeqCst);
         tracing::info!("interval done");
     });
     (StatusCode::OK, format!("interval {count}x@{interval}s"))
 }
 
 async fn interval_stop(State(s): State<AppState>) -> impl IntoResponse {
-    s.interval_active.store(false, std::sync::atomic::Ordering::SeqCst);
+    // 실행 가드(interval_active)는 소유 태스크가 해제. 여기선 취소 신호만.
+    s.interval_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
     (StatusCode::OK, "stopped".to_string())
 }
 
@@ -2034,9 +2046,11 @@ async fn main() {
         last_image: Arc::new(Mutex::new(None)),
         bulb_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         interval_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        interval_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         lv_tx: broadcast::channel::<Arc<Vec<u8>>>(4).0,
         lv_running: Arc::new(std::sync::Mutex::new(false)),
         af_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        af_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         me_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         #[cfg(feature = "detector")]
         detector: load_detector(),
