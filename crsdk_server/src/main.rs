@@ -525,7 +525,10 @@ async fn af_grab(
     for _ in 0..frames {
         let f = match tokio::time::timeout(Duration::from_millis(700), rx.recv()).await {
             Ok(Ok(f)) => f,
-            _ => break,
+            // 브로드캐스트 랙(느린 소비자)은 복구 가능 — 이 프레임만 건너뛰고 계속.
+            // 치명적으로 처리하면 AF 부하가 유발한 랙에 스스로 중단됨(오탐 "라이브뷰 없음").
+            Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+            _ => break, // 타임아웃 또는 채널 닫힘
         };
         if let Ok(Some(m)) = tokio::task::spawn_blocking(move || {
             autofocus::focus_measure(&f[..], cx, cy, roi_w, roi_h)
@@ -1456,6 +1459,16 @@ async fn wait_jpeg_download(
     }
 }
 
+/// 단일실행 AtomicBool 가드: 드롭 시 반드시 false로 되돌린다. 핸들러 future가 정상/에러
+/// 종료뿐 아니라 **클라이언트 연결 끊김으로 취소(드롭)**될 때도 플래그를 해제해, 취소
+/// 라우트가 없는 인라인 작업이 "already running"으로 영구 잠기는 것을 막는다.
+struct RunGuard(Arc<std::sync::atomic::AtomicBool>);
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// N장 연속 촬영 → 다운로드된 JPEG들을 블렌드 합성 → 1장 저장. 진행/완료는 events SSE.
 async fn multi_exposure(State(s): State<AppState>, Json(b): Json<MultiExpReq>) -> Response {
     use std::sync::atomic::Ordering;
@@ -1477,6 +1490,8 @@ async fn multi_exposure(State(s): State<AppState>, Json(b): Json<MultiExpReq>) -
     {
         return (StatusCode::CONFLICT, "multi-exposure already running").into_response();
     }
+    // 이 가드가 모든 종료 경로(정상/에러 return/클라 끊김 드롭)에서 me_active를 해제.
+    let _me_guard = RunGuard(s.me_active.clone());
     let events = s.events_tx.clone();
     // 첫 셔터 전에 구독해야 다운로드 이벤트를 놓치지 않음.
     let mut ev_rx = s.events_tx.subscribe();
@@ -1488,14 +1503,12 @@ async fn multi_exposure(State(s): State<AppState>, Json(b): Json<MultiExpReq>) -
             .map_err(|e| format!("task: {e}"))
             .and_then(|r| r.map_err(|e| format!("sdk: {e:?}")));
         if let Err(e) = shot {
-            s.me_active.store(false, Ordering::SeqCst);
             return (StatusCode::INTERNAL_SERVER_ERROR, format!("capture {}/{count}: {e}", i + 1))
                 .into_response();
         }
         match wait_jpeg_download(&mut ev_rx, shot_timeout).await {
             Ok(f) => files.push(f),
             Err(e) => {
-                s.me_active.store(false, Ordering::SeqCst);
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("frame {}/{count}: {e} — JPEG 저장(STILL→PC, 파일형식 JPEG) 필요", i + 1),
@@ -1519,7 +1532,6 @@ async fn multi_exposure(State(s): State<AppState>, Json(b): Json<MultiExpReq>) -
         composite::blend_jpegs(&jpegs, mode)
     })
     .await;
-    s.me_active.store(false, Ordering::SeqCst);
 
     let out = match blended {
         Ok(Ok(bytes)) => bytes,

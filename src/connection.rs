@@ -95,14 +95,26 @@ impl<'session> Camera<'session> {
             return Err(SdkError::ConnectFailed(CrErrorCode(err)));
         }
 
+        // handle is live and the callback is registered in the SDK now. Wrap it in the
+        // RAII Camera *before* the wait loop so any early return (timeout/error) runs the
+        // ordered Drop teardown (deactivate→disconnect→release) instead of leaking a
+        // registered callback + device handle (the SDK background thread could otherwise
+        // call the just-freed callback → UAF).
+        let cam = Self {
+            handle,
+            callback,
+            events: Some(rx),
+            _session: PhantomData,
+        };
+
         // Wait for OnConnected, discarding spurious events (PropertyChanged,
         // LvPropertyChanged, Warning, ...) that may arrive first.
         let deadline = Instant::now() + timeout;
         loop {
             let remaining = deadline
                 .checked_duration_since(Instant::now())
-                .ok_or(SdkError::ConnectTimeout)?;
-            match rx.recv_timeout(remaining) {
+                .ok_or(SdkError::ConnectTimeout)?; // drops `cam` → ordered teardown
+            match cam.events.as_ref().unwrap().recv_timeout(remaining) {
                 Ok(CameraEvent::Connected { .. }) => break,
                 Ok(CameraEvent::Error(e)) => {
                     return Err(SdkError::ConnectFailed(CrErrorCode(e as i32)));
@@ -112,12 +124,7 @@ impl<'session> Camera<'session> {
             }
         }
 
-        Ok(Self {
-            handle,
-            callback,
-            events: Some(rx),
-            _session: PhantomData,
-        })
+        Ok(cam)
     }
 
     pub fn device_handle(&self) -> i64 { self.handle }
