@@ -550,11 +550,15 @@ int32_t get_device_properties(int64_t           handle,
         uint32_t base = dt & 0x000Fu;
         size_t   esz  = (base == 1) ? 1u : (base == 2) ? 2u : (base == 3) ? 4u : 8u;
 
-        uint32_t n = 0;
+        uint32_t nbytes = 0;
         if (base != 0x000Bu) {
-            if (dt & 0x2000u)      n = sdk_props[i].GetSetValueSize(); /* array: 설정가능 원소 수 */
-            else if (dt & 0x4000u) n = sdk_props[i].GetValueSize();    /* range: min/step/max */
+            if (dt & 0x2000u)      nbytes = sdk_props[i].GetSetValueSize(); /* array: 설정가능 값 배열 바이트 크기 */
+            else if (dt & 0x4000u) nbytes = sdk_props[i].GetValueSize();    /* range: [min,max,step] 바이트 크기 */
         }
+        /* GetSetValueSize/GetValueSize = 원소 수가 아니라 바이트 크기 → 원소 수 = bytes/esz.
+           바이트를 원소 수로 쓰면 esz>1(2·4바이트) 타입에서 esz배 과다 루프 = 힙 오버리드 +
+           allowed에 쓰레기값 유입(프론트가 라벨 디코드 실패로 걸러 시각상 안 보였음). A7C 하드웨어 확정. */
+        uint32_t n = (esz > 0) ? nbytes / (uint32_t)esz : 0;
         if (n > 0) {
             const uint8_t* raw =
                 static_cast<const uint8_t*>(sdk_props[i].GetValues());
