@@ -77,6 +77,12 @@ int detector_infer(Detector *d, const uint8_t *rgb, int W, int H,
 
     MLMultiArray *lg = [out featureValueForName:@"logits"].multiArrayValue;  // [1,300,80]
     MLMultiArray *bx = [out featureValueForName:@"boxes"].multiArrayValue;   // [1,300,4]
+    // 잘못된/손상된 모델(출력 이름·랭크 불일치)이면 rd()가 NULL dataPointer를 역참조하거나
+    // strides[2]가 범위를 벗어나 크래시한다 → 프로세스를 죽이지 않고 -1로 물러난다.
+    if (!lg || !bx || lg.shape.count < 3 || bx.shape.count < 3) {
+      NSLog(@"detector: unexpected model outputs (need logits[1,300,80] + boxes[1,300,4])");
+      return -1;
+    }
 
     struct Det { float s; int c, q; };
     std::vector<Det> ds;
