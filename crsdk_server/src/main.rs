@@ -183,6 +183,7 @@ struct AppState {
     lv_running: Arc<std::sync::Mutex<bool>>, // LiveView 프로듀서 가동 여부 (시작/종료 race 방지용 락)
     af_active: Arc<std::sync::atomic::AtomicBool>, // SW-AF 스윕 진행중 (단일 실행 가드, 소유자만 해제)
     af_cancel: Arc<std::sync::atomic::AtomicBool>, // SW-AF 취소 신호 (cancel이 set, 스윕이 관측)
+    af_target: Arc<std::sync::Mutex<(f64, f64, f64, f64)>>, // 추적AF 대상 ROI(cx,cy,w,h) — retarget이 갱신, 연속 루프가 매 사이클 관측
     me_active: Arc<std::sync::atomic::AtomicBool>, // 다중노출 시퀀스 진행중 (중복 트리거 방지)
     connecting: Arc<std::sync::atomic::AtomicBool>, // 연결 시도 진행중 (동시 connect 직렬화)
     #[cfg(feature = "detector")]
@@ -698,6 +699,7 @@ struct SwAfResult {
 }
 
 /// SW-AF 스윕 파라미터(요청에서 파싱·클램프). lock 코어와 continuous가 공유.
+#[derive(Clone, Copy)]
 struct SwAfParams {
     cx: f64,
     cy: f64,
@@ -932,6 +934,9 @@ async fn sw_autofocus_continuous(State(s): State<AppState>, Json(mut b): Json<Sw
     let events = s.events_tx.clone();
     let lv_tx = s.lv_tx.clone();
     let cam = s.camera.clone();
+    // 추적AF: 대상 ROI를 초기 지점으로 세팅(retarget이 이후 갱신). 태스크가 매 사이클 관측.
+    *s.af_target.lock().unwrap_or_else(|e| e.into_inner()) = (p.cx, p.cy, p.roi_w, p.roi_h);
+    let target = s.af_target.clone();
 
     tokio::spawn(async move {
         let _guard = guard; // 태스크 종료(정상/조기 return) 시 af_active 해제
@@ -958,14 +963,21 @@ async fn sw_autofocus_continuous(State(s): State<AppState>, Json(mut b): Json<Sw
             if cam.lock().await.as_ref().map(|c| c.0.device_handle()) != Some(handle) {
                 break;
             }
-            let cur = af_grab(&mut rx, p.cx, p.cy, p.roi_w, p.roi_h, p.frames)
+            // 추적AF: 클라가 retarget으로 갱신한 최신 ROI를 매 사이클 반영(피사체 추적).
+            let pc = {
+                let (tx, ty, tw, th) = *target.lock().unwrap_or_else(|e| e.into_inner());
+                let mut q = p;
+                q.cx = tx; q.cy = ty; q.roi_w = tw; q.roi_h = th;
+                q
+            };
+            let cur = af_grab(&mut rx, pc.cx, pc.cy, pc.roi_w, pc.roi_h, pc.frames)
                 .await
                 .unwrap_or(0.0);
             if baseline > 0.0 && cur < baseline * threshold {
                 let _ = events.send(format!(
                     r#"{{"type":"af_continuous","state":"refocus","score":{cur:.0}}}"#
                 ));
-                let (_, _, _, _, nb) = swaf_lock(handle, &mut rx, &p, &cancel, &events).await;
+                let (_, _, _, _, nb) = swaf_lock(handle, &mut rx, &pc, &cancel, &events).await;
                 baseline = nb;
                 let _ = events.send(format!(
                     r#"{{"type":"af_continuous","state":"locked","score":{baseline:.0}}}"#
@@ -987,6 +999,20 @@ async fn sw_autofocus_cancel(State(s): State<AppState>) -> impl IntoResponse {
     s.af_cancel
         .store(true, std::sync::atomic::Ordering::SeqCst);
     (StatusCode::OK, "cancel")
+}
+
+#[derive(Deserialize)]
+struct RetargetReq { x: f64, y: f64, w: Option<f64>, h: Option<f64> }
+
+/// 추적AF: 진행 중인 연속 AF의 대상 ROI를 갱신(피사체가 움직이면 클라가 새 centroid 전송).
+/// 좌표는 미회전 정규화(SW-AF와 동일). 연속 AF 미실행 중이면 다음 시작 때 덮여 무해.
+async fn sw_autofocus_retarget(State(s): State<AppState>, Json(b): Json<RetargetReq>) -> impl IntoResponse {
+    let mut g = s.af_target.lock().unwrap_or_else(|e| e.into_inner());
+    g.0 = b.x.clamp(0.0, 1.0);
+    g.1 = b.y.clamp(0.0, 1.0);
+    if let Some(w) = b.w { g.2 = w.clamp(0.05, 0.9); }
+    if let Some(h) = b.h { g.3 = h.clamp(0.05, 0.9); }
+    (StatusCode::OK, "retargeted")
 }
 
 #[derive(Deserialize)]
@@ -2069,6 +2095,7 @@ async fn main() {
         lv_running: Arc::new(std::sync::Mutex::new(false)),
         af_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         af_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        af_target: Arc::new(std::sync::Mutex::new((0.5, 0.5, 0.25, 0.25))),
         me_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         connecting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         #[cfg(feature = "detector")]
@@ -2124,6 +2151,7 @@ async fn main() {
         .route("/api/sw_autofocus", post(sw_autofocus))
         .route("/api/sw_autofocus/continuous", post(sw_autofocus_continuous))
         .route("/api/sw_autofocus/cancel", post(sw_autofocus_cancel))
+        .route("/api/sw_autofocus/retarget", post(sw_autofocus_retarget))
         .route("/api/capabilities", get(capabilities))
         .route("/api/_debug/sharpness", get(debug_sharpness))
         .route("/api/_debug/codes", get(debug_all_codes))

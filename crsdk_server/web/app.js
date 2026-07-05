@@ -742,7 +742,7 @@
         if (swafRunning) setSwaf(`AF ${ev.phase} ${ev.i}/${ev.n}`);
         break;
       case 'af_continuous':          // 연속 AF 상태(locked/hold/refocus/stopped)
-        if (ev.state === 'stopped') { swafReset(); }
+        if (ev.state === 'stopped') { swafReset(); trackAfOff(false); }
         else if (swafRunning && swafCont) setSwaf(`AF·${ev.state} (stop)`);
         break;
       case 'multi_exposure':         // 다중노출 진행률(장당 emit)
@@ -1039,6 +1039,24 @@
   const detStatusEl = document.querySelector('#detStatus span');
   let detTimer = null, detTarget = null, detImg = { w: 1024, h: 680 };
   const detSet = (t) => { if (detStatusEl) detStatusEl.textContent = t; };
+  // 추적AF v2: Track AF = 토글. 켜면 대상에서 연속AF 시작 + 대상이 움직이면 retarget으로
+  // 서버 ROI를 따라가게 해 재합초. (SW-AF는 풀스윕이라 실시간 서보 아님 — 주기적 재-lock.)
+  let trackAfOn = false, lastRetarget = null;
+  const RETARGET_TH = 0.04;   // 이 이상(정규화) 이동 시에만 retarget — 미세 떨림에 재합초 남발 방지
+  const trackAfLabel = (on) => { trackAfBtn.textContent = on ? 'Track AF ■' : 'Track AF'; trackAfBtn.classList.toggle('active', on); };
+  const maybeRetarget = () => {
+    if (!trackAfOn || !detTarget) return;
+    if (lastRetarget && Math.hypot(detTarget.cx-lastRetarget.cx, detTarget.cy-lastRetarget.cy) < RETARGET_TH) return;
+    lastRetarget = { cx: detTarget.cx, cy: detTarget.cy };
+    fetch('/api/sw_autofocus/retarget', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ x: detTarget.cx, y: detTarget.cy,
+        w: Math.min(0.5, Math.max(0.1, detTarget.w)), h: Math.min(0.5, Math.max(0.1, detTarget.h)) }) }).catch(()=>{});
+  };
+  const trackAfOff = (sendCancel) => {
+    if (!trackAfOn) return;
+    trackAfOn = false; lastRetarget = null; trackAfLabel(false);
+    if (sendCancel) fetch('/api/sw_autofocus/cancel', { method:'POST' }).catch(()=>{});
+  };
   // 검출 박스(raw lv 픽셀) → 정규화 중심/크기. (회전 off 가정 v1)
   const detCenter = (b) => ({ cx: (b[0]+b[2])/2/detImg.w, cy: (b[1]+b[3])/2/detImg.h,
                               w: (b[2]-b[0])/detImg.w, h: (b[3]-b[1])/detImg.h });
@@ -1056,7 +1074,7 @@
       el.style.width = (c.w * r.width) + 'px'; el.style.height = (c.h * r.height) + 'px';
       el.innerHTML = `<span class="det-tag">${COCO[d.class] || d.class} ${(d.score*100)|0}%</span>`;
       if (detTarget && Math.hypot(c.cx-detTarget.cx, c.cy-detTarget.cy) < 0.06) el.classList.add('target');
-      el.addEventListener('click', (e) => { e.stopPropagation(); detTarget = c; trackAfBtn.disabled = false; drawDets(dets); });
+      el.addEventListener('click', (e) => { e.stopPropagation(); detTarget = c; lastRetarget = null; trackAfBtn.disabled = false; drawDets(dets); maybeRetarget(); });
       detOverlay.appendChild(el);
     });
   };
@@ -1073,24 +1091,28 @@
         if (best && bd < 0.15) detTarget = best;
       }
       drawDets(j.detections);
-      detSet(`검출 ${j.detections.length}개` + (detTarget ? ' · 추적중' : ''));
+      maybeRetarget();   // 추적 갱신된 대상으로 연속AF ROI 따라가게
+      detSet(`검출 ${j.detections.length}개` + (detTarget ? (trackAfOn ? ' · 추적AF' : ' · 추적중') : ''));
     } catch (e) { detSet('검출 실패'); }
   };
   detBtn.addEventListener('click', () => {
-    if (detTimer) { clearInterval(detTimer); detTimer = null; detOverlay.style.display = 'none'; detOverlay.innerHTML = ''; detTarget = null; trackAfBtn.disabled = true; detBtn.textContent = 'Detect ▶'; detBtn.classList.remove('active'); detSet('정지'); return; }
+    if (detTimer) { clearInterval(detTimer); detTimer = null; detOverlay.style.display = 'none'; detOverlay.innerHTML = ''; detTarget = null; trackAfOff(true); trackAfBtn.disabled = true; detBtn.textContent = 'Detect ▶'; detBtn.classList.remove('active'); detSet('정지'); return; }
     detBtn.textContent = 'Detect ■'; detBtn.classList.add('active');
     detOnce(); detTimer = setInterval(detOnce, 800);
   });
   trackAfBtn.addEventListener('click', () => {
+    if (trackAfOn) { trackAfOff(true); return; }        // 토글 OFF → 연속AF 취소
     if (!detTarget) return;
     const cfg = swafCfg();
     cfg.roi_w = Math.min(0.5, Math.max(0.1, detTarget.w));
     cfg.roi_h = Math.min(0.5, Math.max(0.1, detTarget.h));
     delete cfg.roi;
-    fetch('/api/sw_autofocus', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    trackAfOn = true; lastRetarget = { cx: detTarget.cx, cy: detTarget.cy }; trackAfLabel(true);
+    // 연속AF 시작(초기 대상). 이후 detOnce의 maybeRetarget이 이동을 따라감.
+    fetch('/api/sw_autofocus/continuous', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ x: detTarget.cx, y: detTarget.cy, ...cfg }) })
-      .then(r => r.ok ? toast('추적 AF', 'ok') : r.text().then(t => toast('AF: ' + t, 'err')))
-      .catch(() => toast('AF 실패', 'err'));
+      .then(r => { if (r.ok) toast('추적 AF 시작', 'ok'); else r.text().then(t => { toast('AF: ' + t, 'err'); trackAfOff(false); }); })
+      .catch(() => { toast('AF 실패', 'err'); trackAfOff(false); });
   });
 
   // ── AF D-pad 너지 + 방향키 (영역 미세 이동) ──────────────────────────
