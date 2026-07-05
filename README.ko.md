@@ -60,7 +60,7 @@ Sony C++ SDK ──► wrapper/wrapper.{h,cpp}  (pure-C shim, SCRSDK 네임스�
                      └─► build.rs (cc + bindgen) ─► src/ffi.rs
                             └─► safe Rust lib: session / enumerate / connection /
                                 liveview / shutter / control / properties / callback / error
-                                   └─► crsdk_server (axum/tokio) + crsdk_server/web/index.html
+                                   └─► crsdk_server (axum/tokio) + web/{index.html, styles.css, app.js}
 ```
 
 모든 SDK 호출은 `spawn_blocking`으로 격리, 카메라는 `Arc<Mutex<…>>` 뒤에 둡니다.
