@@ -742,6 +742,7 @@
         if (swafRunning) setSwaf(`AF ${ev.phase} ${ev.i}/${ev.n}`);
         break;
       case 'af_continuous':          // 연속 AF 상태(locked/hold/refocus/stopped)
+        detRefocusing = (ev.state === 'refocus');   // 스윕 중 화면 블러 → 검출 실패 → bbox 얼림(아래 detOnce)
         if (ev.state === 'stopped') { swafReset(); trackAfOff(false); }
         else if (swafRunning && swafCont) setSwaf(`AF·${ev.state} (stop)`);
         break;
@@ -1041,7 +1042,7 @@
   const detSet = (t) => { if (detStatusEl) detStatusEl.textContent = t; };
   // 추적AF v2: Track AF = 토글. 켜면 대상에서 연속AF 시작 + 대상이 움직이면 retarget으로
   // 서버 ROI를 따라가게 해 재합초. (SW-AF는 풀스윕이라 실시간 서보 아님 — 주기적 재-lock.)
-  let trackAfOn = false, lastRetarget = null;
+  let trackAfOn = false, lastRetarget = null, detRefocusing = false;
   const RETARGET_TH = 0.04;   // 이 이상(정규화) 이동 시에만 retarget — 미세 떨림에 재합초 남발 방지
   const trackAfLabel = (on) => { trackAfBtn.textContent = on ? 'Track AF ■' : 'Track AF'; trackAfBtn.classList.toggle('active', on); };
   const maybeRetarget = () => {
@@ -1079,6 +1080,7 @@
     });
   };
   const detOnce = async () => {
+    if (detRefocusing) return;   // 재합초 스윕 중 = 화면 블러 → 검출 건너뛰고 마지막 박스 유지
     try {
       const res = await fetch('/api/detect', { method: 'POST' });
       if (!res.ok) { detSet('검출 불가: ' + (await res.text())); return; }

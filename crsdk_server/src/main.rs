@@ -977,7 +977,12 @@ async fn sw_autofocus_continuous(State(s): State<AppState>, Json(mut b): Json<Sw
                 let _ = events.send(format!(
                     r#"{{"type":"af_continuous","state":"refocus","score":{cur:.0}}}"#
                 ));
-                let (_, _, _, _, nb) = swaf_lock(handle, &mut rx, &pc, &cancel, &events).await;
+                // 재-lock은 좁게: 피사체는 이미 초점 근처에서 조금씩 이동한다. 풀스윕(step·n 큼)은
+                // 순간 큰 디포커스로 검출을 놓쳐 bbox가 사라짐 → 스텝·윈도우를 줄인 국소 탐색.
+                let mut relock = pc;
+                relock.n = relock.n.min(10);
+                relock.step = (relock.step / 2).max(relock.fine_step);
+                let (_, _, _, _, nb) = swaf_lock(handle, &mut rx, &relock, &cancel, &events).await;
                 baseline = nb;
                 let _ = events.send(format!(
                     r#"{{"type":"af_continuous","state":"locked","score":{baseline:.0}}}"#
