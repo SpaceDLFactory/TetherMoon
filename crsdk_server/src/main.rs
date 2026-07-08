@@ -1743,7 +1743,8 @@ async fn events(State(s): State<AppState>) -> Sse<impl Stream<Item = Result<Even
 // 카메라 해제(fetch 에러) 시 종료 → lv_running=false → 재연결 후 다음 /lv가 재시작.
 // (브라우저가 닫혀도 연결 중엔 계속 가동: broadcast는 무손실·비블로킹이라 hyper가 끊긴
 //  Receiver를 즉시 드롭하지 않아 시청자-0 종료를 신뢰할 수 없음 → 상시 가동으로 단순화.)
-fn lv_producer(handle: i64, lv_tx: broadcast::Sender<Arc<Vec<u8>>>, running: Arc<std::sync::Mutex<bool>>) {
+fn lv_producer(handle: i64, lv_tx: broadcast::Sender<Arc<Vec<u8>>>, running: Arc<std::sync::Mutex<bool>>,
+               cam: Arc<Mutex<Option<CameraCell>>>) {
     // 연결 직후 카메라가 LiveView를 준비하는 데 시간이 필요 → 최대 4s 재시도
     let mut lv = None;
     for _ in 0..20 {
@@ -1774,6 +1775,16 @@ fn lv_producer(handle: i64, lv_tx: broadcast::Sender<Arc<Vec<u8>>>, running: Arc
             Err(e) => {
                 tracing::warn!("lv: fetch error after {sent} frames: {e:?}");
                 *running.lock().unwrap_or_else(|e| e.into_inner()) = false;
+                // 스트리밍하다 죽으면 하드 USB 제거 가능성(SDK OnDisconnected 콜백 미발화 대비) →
+                // 세션을 비워 재연결 루프가 다시 붙게 한다. 스타트업 transient(0프레임)는 제외.
+                // 우리 handle이 아직 걸려 있을 때만(새로 붙은 세션 오염 방지).
+                if sent > 10 {
+                    let mut g = cam.blocking_lock();
+                    if g.as_ref().map(|c| c.0.device_handle()) == Some(handle) {
+                        tracing::warn!("lv: treating fetch error as disconnect → clearing session");
+                        *g = None;
+                    }
+                }
                 break;
             }
         }
@@ -1803,7 +1814,8 @@ async fn liveview(State(s): State<AppState>) -> Response {
             *running = true;
             let lv_tx = s.lv_tx.clone();
             let running_c = s.lv_running.clone();
-            tokio::task::spawn_blocking(move || lv_producer(handle, lv_tx, running_c));
+            let cam = s.camera.clone();
+            tokio::task::spawn_blocking(move || lv_producer(handle, lv_tx, running_c, cam));
         }
     }
 
