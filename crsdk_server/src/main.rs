@@ -74,6 +74,10 @@ impl UsbInterferenceSuppressor {
             .stderr(std::process::Stdio::null())
             .spawn()
             .ok()?;
+        // 재시작 완화: 직전 서버 종료~신규 억제 사이 틈에 ptpcamerad가 카메라 USB를 잡을 수
+        // 있다. 킬 루프가 그놈을 정리하고 USB 인터페이스가 풀릴 짧은 시간을 준 뒤 진행 —
+        // 첫 연결 시도가 '선점됨'으로 실패해 replug가 필요해지는 빈도를 줄인다(완전 제거 아님).
+        std::thread::sleep(Duration::from_millis(400));
         Some(Self { child })
     }
 
