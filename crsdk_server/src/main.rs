@@ -1185,9 +1185,18 @@ async fn browse_save_path(State(s): State<AppState>) -> impl IntoResponse {
     }
 }
 
+/// 카메라 해제(Drop: deactivate_callback → disconnect → release)를 blocking 풀에서 실행.
+/// Camera Drop은 실제 USB 왕복이라 수 초 걸릴 수 있음 → tokio 워커/카메라 락을 붙잡은 채
+/// 동기 실행하면 다른 핸들러가 락에서 대기하고 워커가 스톨한다. take() 후 spawn_blocking에서 drop.
+async fn release_camera(camera: &tokio::sync::Mutex<Option<CameraCell>>) {
+    let cell = camera.lock().await.take();
+    if cell.is_some() {
+        let _ = tokio::task::spawn_blocking(move || drop(cell)).await;
+    }
+}
+
 async fn disconnect(State(s): State<AppState>) -> impl IntoResponse {
-    // Camera Drop이 deactivate_callback → disconnect → release 순서로 실행
-    *s.camera.lock().await = None;
+    release_camera(&s.camera).await;
     tracing::info!("camera disconnected");
     (StatusCode::OK, "disconnected")
 }
@@ -1764,23 +1773,33 @@ async fn events(State(s): State<AppState>) -> Sse<impl Stream<Item = Result<Even
 // 카메라 해제(fetch 에러) 시 종료 → lv_running=false → 재연결 후 다음 /lv가 재시작.
 // (브라우저가 닫혀도 연결 중엔 계속 가동: broadcast는 무손실·비블로킹이라 hyper가 끊긴
 //  Receiver를 즉시 드롭하지 않아 시청자-0 종료를 신뢰할 수 없음 → 상시 가동으로 단순화.)
+/// lv_producer 종료(정상/에러/**패닉**/early-return) 시 반드시 lv_running=false로 되돌려
+/// 다음 /lv 요청이 프로듀서를 재시작하게 한다. 없으면 패닉 시 running=true가 고착돼
+/// 프로세스 재시작 전까지 라이브뷰가 영구 정지한다.
+struct LvGuard(Arc<std::sync::Mutex<bool>>);
+impl Drop for LvGuard {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = false;
+    }
+}
+
 fn lv_producer(handle: i64, lv_tx: broadcast::Sender<Arc<Vec<u8>>>, running: Arc<std::sync::Mutex<bool>>,
                cam: Arc<Mutex<Option<CameraCell>>>) {
+    let _run = LvGuard(running.clone());
     // 연결 직후 카메라가 LiveView를 준비하는 데 시간이 필요 → 최대 4s 재시도
     let mut lv = None;
     for _ in 0..20 {
         match LiveViewStream::new(handle) {
             Ok(s) => { lv = Some(s); break; }
             Err(SdkError::LiveViewUnavailable) => std::thread::sleep(Duration::from_millis(200)),
-            Err(_) => { *running.lock().unwrap_or_else(|e| e.into_inner()) = false; return; }
+            Err(_) => return, // LvGuard가 running=false 처리
         }
     }
     let lv = match lv {
         Some(s) => s,
         None => {
             tracing::warn!("lv: LiveViewStream unavailable after retries");
-            *running.lock().unwrap_or_else(|e| e.into_inner()) = false;
-            return;
+            return; // LvGuard가 running=false 처리
         }
     };
     tracing::info!("lv: producer started");
@@ -1795,7 +1814,7 @@ fn lv_producer(handle: i64, lv_tx: broadcast::Sender<Arc<Vec<u8>>>, running: Arc
             Ok(_) => std::thread::sleep(Duration::from_millis(16)), // 아직 새 프레임 없음
             Err(e) => {
                 tracing::warn!("lv: fetch error after {sent} frames: {e:?}");
-                *running.lock().unwrap_or_else(|e| e.into_inner()) = false;
+                // running=false는 함수 종료 시 LvGuard가 처리.
                 // 스트리밍하다 죽으면 하드 USB 제거 가능성(SDK OnDisconnected 콜백 미발화 대비) →
                 // 세션을 비워 재연결 루프가 다시 붙게 한다. 스타트업 transient(0프레임)는 제외.
                 // 우리 handle이 아직 걸려 있을 때만(새로 붙은 세션 오염 방지).
@@ -2017,7 +2036,7 @@ async fn server_info() -> Json<serde_json::Value> {
 /// 카메라를 먼저 해제(Drop)한 뒤 잠시 후 프로세스 종료.
 async fn quit(State(s): State<AppState>) -> impl IntoResponse {
     tracing::info!("quit requested via API");
-    *s.camera.lock().await = None; // Camera Drop(disconnect/release) 동기 실행
+    release_camera(&s.camera).await; // Camera Drop(disconnect/release)을 blocking 풀에서
     tokio::spawn(async {
         tokio::time::sleep(Duration::from_millis(300)).await;
         std::process::exit(0);
@@ -2261,7 +2280,7 @@ async fn shutdown_signal(state: AppState) {
         _ = terminate => {},
     }
     tracing::info!("shutdown signal received — disconnecting camera");
-    *state.camera.lock().await = None; // Camera Drop(disconnect/release)을 동기 실행
+    release_camera(&state.camera).await; // Camera Drop(disconnect/release)을 blocking 풀에서
 
     // 스트리밍 연결이 드레인되지 않아 graceful shutdown이 무한 대기하는 것을 방지.
     // 카메라 정리는 위에서 끝났으니, 유예 후 강제 종료한다. 정상 연결은 그 사이 닫히고

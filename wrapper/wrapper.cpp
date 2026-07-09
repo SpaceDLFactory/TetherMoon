@@ -719,9 +719,12 @@ int32_t get_control_code_info(int64_t handle, uint32_t code, CrControlInfoSimple
                : (base == 3) ? 4u
                : 8u;
 
-    /* GetValueSize: Range 면 3(min/step/max), Array 면 원소 수. */
+    /* GetValueSize = 바이트 크기(원소 수 아님) → 원소 수 = bytes/esz.
+     * 바이트를 원소 수로 쓰면 esz>1(u16/u32/u64) 타입에서 esz배 과다 루프 = 힙 오버리드
+     * (앞 몇 개는 맞게 나와 시각상 안 보였음). get_device_properties(:558-561)와 동일 수정. */
     uint32_t vsize = info->GetValueSize();
-    uint32_t cap = (vsize < CR_CONTROL_MAX_VALUES) ? vsize : CR_CONTROL_MAX_VALUES;
+    uint32_t n = (esz > 0) ? vsize / (uint32_t)esz : 0;
+    uint32_t cap = (n < CR_CONTROL_MAX_VALUES) ? n : CR_CONTROL_MAX_VALUES;
     const uint8_t* raw = info->GetValues();
     if (raw) {
         for (uint32_t i = 0; i < cap; ++i) {
