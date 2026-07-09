@@ -24,9 +24,10 @@ cat > "$STAGE/First launch — read me.txt" <<'TXT'
 TetherMoon — install
 
 1) Drag "TetherMoon.app" onto the Applications folder.
-2) First launch: right-click the app -> Open -> Open.
-   (or run in Terminal:
-      xattr -dr com.apple.quarantine "/Applications/TetherMoon.app" )
+2) First launch (the app is adhoc-signed, not notarized). Run in Terminal:
+      xattr -dr com.apple.quarantine "/Applications/TetherMoon.app"
+   then open the app. Since macOS 15 Sequoia the "right-click -> Open"
+   bypass is gone, so this command is what avoids the "app is damaged" error.
 3) Connect the Sony A7C by USB. The app opens your browser automatically.
    On a phone: open the LAN URL shown at the bottom of the page (same Wi-Fi).
 

@@ -22,7 +22,10 @@ No building required. Grab the latest **[release](../../releases/latest)**.
 ### macOS
 
 1. Download the `.dmg`, open it, and drag **TetherMoon** into Applications.
-2. Launch it. First time only: right-click the app → **Open** → **Open**.
+2. First time only, strip the quarantine flag (the app is adhoc-signed, not
+   notarized): run `xattr -dr com.apple.quarantine /Applications/TetherMoon.app`
+   in Terminal, then open the app. (Since macOS 15 Sequoia the "right-click →
+   Open" bypass is gone, so this command is what avoids the "app is damaged" error.)
 3. Connect your A7C by USB and set it to **PC Remote** (camera: MENU → USB →
    *USB Connection Mode* → *PC Remote*). The console opens in your browser.
 4. To watch/control from a phone, open the LAN URL shown at the bottom of the

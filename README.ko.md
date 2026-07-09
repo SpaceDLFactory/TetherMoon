@@ -17,7 +17,10 @@
 빌드 필요 없습니다. 최신 **[릴리즈](../../releases/latest)** 를 받으세요:
 
 1. `.dmg`를 받아 열고 **TetherMoon**을 Applications로 끌어다 놓기.
-2. 실행. 처음 한 번만: 앱 우클릭 → **열기** → **열기**.
+2. 처음 한 번만, 격리 속성 제거 (앱은 adhoc 서명이라 공증되어 있지 않음):
+   터미널에서 `xattr -dr com.apple.quarantine /Applications/TetherMoon.app`
+   실행 후 앱을 엽니다. (macOS 15 Sequoia부터는 "우클릭 → 열기" 우회가
+   막혀서, 이 명령을 써야 "손상되었습니다" 오류 없이 열립니다.)
 3. A7C를 USB로 연결하고 **PC 원격**으로 설정 (카메라: MENU → USB →
    *USB 연결 모드* → *PC 원격*). 콘솔이 브라우저로 자동으로 열립니다.
 4. 폰에서 보려면 페이지 하단에 표시된 LAN 주소를 폰 브라우저에 입력
