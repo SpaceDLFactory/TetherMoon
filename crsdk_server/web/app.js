@@ -1102,6 +1102,14 @@
     detBtn.textContent = 'Detect ■'; detBtn.classList.add('active');
     detOnce(); detTimer = setInterval(detOnce, 800);
   });
+  // 추적AF 튜닝 슬라이더 → 연속AF 파라미터(재시작 시 적용)
+  const tafThreshIn = document.getElementById('tafThreshIn'), tafThreshV = document.getElementById('tafThreshV');
+  const tafCheckIn = document.getElementById('tafCheckIn'), tafCheckV = document.getElementById('tafCheckV');
+  const tafDebIn = document.getElementById('tafDebIn'), tafDebV = document.getElementById('tafDebV');
+  const tafCoolIn = document.getElementById('tafCoolIn'), tafCoolV = document.getElementById('tafCoolV');
+  const tafSync = () => { tafThreshV.textContent = tafThreshIn.value; tafCheckV.textContent = tafCheckIn.value; tafDebV.textContent = tafDebIn.value; tafCoolV.textContent = tafCoolIn.value; };
+  [tafThreshIn, tafCheckIn, tafDebIn, tafCoolIn].forEach(el => el.addEventListener('input', tafSync)); tafSync();
+  const tafCfg = () => ({ threshold: parseFloat(tafThreshIn.value), check_ms: parseInt(tafCheckIn.value, 10), debounce: parseInt(tafDebIn.value, 10), cooldown: parseInt(tafCoolIn.value, 10) });
   trackAfBtn.addEventListener('click', () => {
     if (trackAfOn) { trackAfOff(true); return; }        // 토글 OFF → 연속AF 취소
     if (!detTarget) return;
@@ -1110,9 +1118,9 @@
     cfg.roi_h = Math.min(0.5, Math.max(0.1, detTarget.h));
     delete cfg.roi;
     trackAfOn = true; lastRetarget = { cx: detTarget.cx, cy: detTarget.cy }; trackAfLabel(true);
-    // 연속AF 시작(초기 대상). 이후 detOnce의 maybeRetarget이 이동을 따라감.
+    // 연속AF 시작(초기 대상 + 튜닝값). 이후 detOnce의 maybeRetarget이 이동을 따라감.
     fetch('/api/sw_autofocus/continuous', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ x: detTarget.cx, y: detTarget.cy, ...cfg }) })
+      body: JSON.stringify({ x: detTarget.cx, y: detTarget.cy, ...cfg, ...tafCfg() }) })
       .then(r => { if (r.ok) toast('추적 AF 시작', 'ok'); else r.text().then(t => { toast('AF: ' + t, 'err'); trackAfOff(false); }); })
       .catch(() => { toast('AF 실패', 'err'); trackAfOff(false); });
   });

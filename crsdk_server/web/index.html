@@ -195,6 +195,22 @@
       <div class="row" id="detStatus" style="margin-top:4px;color:var(--fg-mute);font-size:10px;">
         <span>RT-DETR 검출 → 박스 클릭=추적 대상 → Track AF(연속). (detector 빌드 필요)</span>
       </div>
+      <details class="swaf-cfg">
+        <summary>Track AF tuning</summary>
+        <div class="nf-slider" style="grid-template-columns:auto 1fr auto;">
+          <span class="k">Sensit.</span><input type="range" id="tafThreshIn" min="0.3" max="0.9" step="0.05" value="0.45"><span class="nf-val" id="tafThreshV">0.45</span>
+        </div>
+        <div class="nf-slider" style="grid-template-columns:auto 1fr auto;">
+          <span class="k">Check(ms)</span><input type="range" id="tafCheckIn" min="300" max="2000" step="100" value="900"><span class="nf-val" id="tafCheckV">900</span>
+        </div>
+        <div class="nf-slider" style="grid-template-columns:auto 1fr auto;">
+          <span class="k">Debounce</span><input type="range" id="tafDebIn" min="1" max="6" step="1" value="3"><span class="nf-val" id="tafDebV">3</span>
+        </div>
+        <div class="nf-slider" style="grid-template-columns:auto 1fr auto;">
+          <span class="k">Cooldown</span><input type="range" id="tafCoolIn" min="0" max="10" step="1" value="4"><span class="nf-val" id="tafCoolV">4</span>
+        </div>
+        <div class="row" style="color:var(--fg-mute);font-size:10px;"><span>슬라이더 변경은 Track AF 재시작 시 적용</span></div>
+      </details>
       <div class="btn-row" style="grid-template-columns:1fr 1fr;">
         <button class="btn" id="peakBtn" type="button" data-i18n="btn.peakoff">Peaking OFF</button>
         <button class="btn" id="afCenterBtn" type="button" data-i18n="btn.afcenter">AF center</button>

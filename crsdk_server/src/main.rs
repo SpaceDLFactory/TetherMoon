@@ -683,8 +683,10 @@ struct SwAfReq {
     settle_ms: Option<u64>,  // 측정 전 안정 대기(기본 250)
     move_ms: Option<u64>,    // 재배치 이동 스텝 gap(측정 아님 — 등록만, 기본 120)
     frames: Option<u32>,     // 지점당 평균 프레임 수(기본 2)
-    threshold: Option<f64>,  // (continuous) baseline 대비 이 비율 미만이면 재합초(기본 0.7)
-    check_ms: Option<u64>,   // (continuous) 모니터 주기(기본 600)
+    threshold: Option<f64>,  // (continuous) baseline 대비 이 비율 미만이면 재합초(기본 0.45)
+    check_ms: Option<u64>,   // (continuous) 모니터 주기(기본 900)
+    debounce: Option<u32>,   // (continuous) 재합초까지 필요한 연속 하락 횟수(기본 3)
+    cooldown: Option<u32>,   // (continuous) 재합초 후 억제 사이클(기본 4)
 }
 
 #[derive(Serialize)]
@@ -928,8 +930,10 @@ async fn sw_autofocus_continuous(State(s): State<AppState>, Json(mut b): Json<Sw
     let guard = RunGuard(s.af_active.clone());
     apply_aperture_defaults(handle, &mut b).await; // 조리개로 step/roi 기본값(개방→작게)
     let p = SwAfParams::from_req(&b);
-    let threshold = b.threshold.unwrap_or(0.7).clamp(0.3, 0.95);
-    let check = Duration::from_millis(b.check_ms.unwrap_or(600).clamp(150, 5000));
+    let threshold = b.threshold.unwrap_or(0.45).clamp(0.3, 0.95); // 낮을수록 큰 디포커스만 재합초(hunting↓)
+    let check = Duration::from_millis(b.check_ms.unwrap_or(900).clamp(150, 5000));
+    let debounce = b.debounce.unwrap_or(3).clamp(1, 10);   // 재합초까지 연속 하락 횟수
+    let cooldown_n = b.cooldown.unwrap_or(4).clamp(0, 20);  // 재합초 후 억제 사이클
     let cancel = s.af_cancel.clone();
     let events = s.events_tx.clone();
     let lv_tx = s.lv_tx.clone();
@@ -953,6 +957,8 @@ async fn sw_autofocus_continuous(State(s): State<AppState>, Json(mut b): Json<Sw
             r#"{{"type":"af_continuous","state":"locked","score":{baseline:.0}}}"#
         ));
         // 모니터 루프
+        let mut low_streak = 0u32; // 연속 하락 횟수(순간 블러·움직임 debounce)
+        let mut cooldown = 0u32;   // 재합초 직후 재트리거 억제 사이클
         while !cancel.load(Ordering::SeqCst) {
             tokio::time::sleep(check).await;
             if cancel.load(Ordering::SeqCst) {
@@ -973,7 +979,16 @@ async fn sw_autofocus_continuous(State(s): State<AppState>, Json(mut b): Json<Sw
             let cur = af_grab(&mut rx, pc.cx, pc.cy, pc.roi_w, pc.roi_h, pc.frames)
                 .await
                 .unwrap_or(0.0);
+            if cooldown > 0 {
+                cooldown -= 1;
+            }
             if baseline > 0.0 && cur < baseline * threshold {
+                low_streak += 1;
+            } else {
+                low_streak = 0;
+            }
+            // debounce연속 하락 + 쿨다운 아님일 때만 재합초 — 순간 블러·피사체 이동에 스윕 남발(hunting)을 막는다.
+            if low_streak >= debounce && cooldown == 0 {
                 let _ = events.send(format!(
                     r#"{{"type":"af_continuous","state":"refocus","score":{cur:.0}}}"#
                 ));
@@ -984,6 +999,8 @@ async fn sw_autofocus_continuous(State(s): State<AppState>, Json(mut b): Json<Sw
                 relock.step = (relock.step / 2).max(relock.fine_step);
                 let (_, _, _, _, nb) = swaf_lock(handle, &mut rx, &relock, &cancel, &events).await;
                 baseline = nb;
+                low_streak = 0;
+                cooldown = cooldown_n; // 재합초 후 몇 사이클 쉼(피사체 계속 이동 중 재트리거 방지)
                 let _ = events.send(format!(
                     r#"{{"type":"af_continuous","state":"locked","score":{baseline:.0}}}"#
                 ));
