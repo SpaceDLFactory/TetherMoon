@@ -3,7 +3,7 @@ members = ["crsdk_server", "detector"]
 
 [package]
 name = "crsdk"
-version = "0.2.5"
+version = "0.3.0"
 edition = "2021"
 description = "Sony Camera Remote SDK v2.01.00 Rust wrapper (A7C/ILCE-7C)"
 
