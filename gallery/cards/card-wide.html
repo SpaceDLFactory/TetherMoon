@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><style>
+  :root{ --amber:#f0b46a; --ink:#e9eaf0; --mut:#9aa0ad; --bg0:#0b0c12; --bg1:#04050a; }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:100vw;height:100vh}
+  body{
+    font-family:-apple-system,"SF Pro Display","Helvetica Neue",Arial,sans-serif;
+    background:radial-gradient(90% 120% at 20% 40%, #12131c 0%, var(--bg0) 45%, var(--bg1) 100%);
+    color:var(--ink); overflow:hidden; display:flex; align-items:center; gap:4vw;
+    padding:5vw 5.5vw;
+  }
+  .left{flex:0 0 32%;display:flex;flex-direction:column;align-items:center;text-align:center}
+  .moon-wrap{position:relative}
+  .moon-wrap::before{content:"";position:absolute;inset:-36%;border-radius:50%;
+    background:radial-gradient(circle, rgba(240,180,106,.28) 0%, rgba(240,180,106,.10) 38%, transparent 66%);
+    filter:blur(6px)}
+  .moon{position:relative;width:15vw;height:15vw;border-radius:50%;object-fit:cover;
+    box-shadow:0 0 2vw rgba(240,180,106,.22)}
+  .word{margin-top:2.6vw;font-weight:800;font-size:5.6vw;letter-spacing:-.02em;line-height:1}
+  .word .m{color:var(--amber)} .word .c{font-size:4vw;margin-left:.3vw}
+  .tag{margin-top:1.1vw;font-size:1.5vw;color:var(--mut);font-weight:500}
+  .right{flex:1;display:flex;flex-direction:column}
+  .top{display:flex;align-items:center;flex-wrap:wrap;gap:.9vw;margin-bottom:.6vw}
+  .ver{font-size:1.3vw;font-weight:700;color:var(--amber);border:1px solid rgba(240,180,106,.5);
+    border-radius:999px;padding:.4vw 1.1vw;letter-spacing:.02em}
+  .chip{font-size:1.3vw;font-weight:600;color:#cfd3dc;background:rgba(255,255,255,.05);
+    border:1px solid rgba(255,255,255,.12);border-radius:999px;padding:.55vw 1.2vw}
+  .chip.hot{color:#dfe7ff;border-color:rgba(120,160,240,.55);background:rgba(90,130,220,.10)}
+  .rows{display:flex;flex-direction:column;margin-top:1.4vw}
+  .row{display:flex;gap:1.8vw;padding:1.35vw 0;border-top:1px solid rgba(255,255,255,.08)}
+  .lab{flex:0 0 6vw;font-size:1.3vw;font-weight:700;color:var(--amber);padding-top:.15vw}
+  .txt{font-size:1.5vw;line-height:1.45;color:#d7dae2;font-weight:500}
+  .foot{margin-top:1.8vw}
+  .repo{font-size:1.55vw;font-weight:700;color:#8fb4ff}
+  .meta{margin-top:.6vw;font-size:1.15vw;color:var(--mut)}
+</style></head><body>
+  <div class="left">
+    <div class="moon-wrap"><img class="moon" src="moon.png" alt="moon"></div>
+    <div class="word">Tether<span class="m">Moon</span><span class="c">🌙</span></div>
+    <div class="tag">Sony A7C · browser tethering</div>
+  </div>
+  <div class="right">
+    <div class="top">
+      <span class="ver">v1.0 · stable</span>
+      <span class="chip">Live view + peaking</span>
+      <span class="chip hot">Software AF</span>
+      <span class="chip">Long exposure · BULB</span>
+      <span class="chip hot">Star-trail stacking</span>
+      <span class="chip">Timelapse</span>
+      <span class="chip">Phone + PC at once</span>
+    </div>
+    <div class="rows">
+      <div class="row"><div class="lab">EN</div><div class="txt">Remote exposure, software AF, live view, long exposure &amp; timelapse from any browser — phone or PC. In-app star-trail stacking.</div></div>
+      <div class="row"><div class="lab">한국어</div><div class="txt">노출·소프트웨어 AF·라이브뷰·장노출·타임랩스를 폰이나 PC 브라우저에서 원격으로. 앱 내 별궤적 합성.</div></div>
+      <div class="row"><div class="lab">日本語</div><div class="txt">露出・ソフトウェアAF・ライブビュー・長秒露光・タイムラプスをブラウザから。アプリ内で星の軌跡を合成。</div></div>
+    </div>
+    <div class="foot">
+      <div class="repo">github.com/SpaceDLFactory/TetherMoon</div>
+      <div class="meta">Free &amp; open source · macOS (Apple Silicon) · Sony A7C / ILCE-7C · MIT</div>
+    </div>
+  </div>
+</body></html>
