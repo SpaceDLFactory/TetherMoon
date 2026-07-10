@@ -104,6 +104,25 @@ The rest of this README is for **building from source**.
 - **Robust** — auto-reconnect, graceful shutdown (clean camera session release),
   opens your browser automatically on launch
 
+### Astro tools (since 1.0)
+
+- **Red night-vision mode** — a 🌙 toggle turns the whole UI low-luminance red to
+  preserve dark adaptation in the field (console + minimal remote share the setting)
+- **Star AF** — one-tap autofocus on the brightest star/point in the frame
+- **Focus meter** — live sharpness readout of the brightest star; turn manual focus
+  and peak the number for perfect focus (a mask-free Bahtinov equivalent)
+- **Exposure bracketing (AEB)** — shoot N frames stepping the EV-compensation list
+- **RAW previews** — `.arw` shots preview by extracting the embedded JPEG
+- **Live stacking** *(Stack tab)* — star-align and accumulate frames to build SNR
+  (Average) or bright detail (Lighten), live from the view or as a full-resolution
+  post-stack of saved frames, with **lucky imaging** (keep only the sharpest %) and
+  three **alignment modes** — Stars (deep-sky), Centroid (moon/planets), or ROI
+  (drag a box to lock onto a feature). True **RAW stacking** (rawler demosaic +
+  16-bit linear accumulation) is available in a `--features raw` build
+- **Shooting plan** *(Plan tab)* — enter your location (or device GPS) and see which
+  targets are up and how high right now; Sun/Moon/planets plus a catalog of bright
+  stars and deep-sky objects, custom targets, and a "shoot this" preset hand-off
+
 ## Screenshots
 
 The single-page **Tether Console** — live view with focus peaking and a rule-of-thirds
