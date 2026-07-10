@@ -1178,6 +1178,11 @@ async fn stack_save(State(s): State<AppState>, Json(b): Json<StackSaveReq>) -> i
 /// (진짜 RAW 디코드 = 16bit 선형은 추후 stacker `raw` feature의 rawloader로 대체.)
 fn decode_to_rgb8(path: &std::path::Path, bytes: &[u8]) -> Option<(Vec<u8>, usize, usize)> {
     let ext = path.extension()?.to_str()?.to_lowercase();
+    #[cfg(feature = "raw")]
+    if ext == "arw" {
+        // 진짜 RAW 디코드(rawler → 디모자이크 + WB, 반해상도) — 임베디드 JPEG보다 고품질.
+        return stacker::decode_raw_rgb8(path.to_str()?);
+    }
     let jpeg: std::borrow::Cow<[u8]> = if ext == "arw" {
         std::borrow::Cow::Owned(extract_embedded_jpeg(bytes)?)
     } else {

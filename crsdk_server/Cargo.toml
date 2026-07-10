@@ -27,3 +27,5 @@ detector   = { path = "../detector", optional = true }  # RT-DETR CoreML(추적A
 [features]
 # 기본 빌드엔 미포함(무거운 CoreML 모델/런타임). `--features detector`로 활성.
 detector = ["dep:detector"]
+# RAW 스택: ARW를 임베디드 JPEG 대신 rawler로 진짜 디코드(디모자이크+WB). `--features raw`.
+raw = ["stacker/raw"]

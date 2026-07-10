@@ -9,7 +9,9 @@ name = "stacker"
 path = "src/lib.rs"
 
 [dependencies]
-# 순수 산술 엔진 — 기본 의존 없음. RAW 디코드(rawloader/imagepipe)는 추후 `raw` feature로.
+# 순수 산술 엔진 — 기본 의존 없음.
+# RAW 디코드는 `raw` feature에서만: rawler(dnglab)로 Sony ARW → bayer.
+rawler = { version = "0.6", optional = true }
 
 [features]
-raw = []
+raw = ["dep:rawler"]

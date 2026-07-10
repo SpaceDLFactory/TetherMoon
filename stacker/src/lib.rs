@@ -32,6 +32,65 @@ pub fn luma_from_rgb(rgb: &[u8], w: usize, h: usize) -> Vec<f32> {
     out
 }
 
+/// Sony ARW 등 RAW를 rawler로 디코드 → 2x2 슈퍼픽셀 디모자이크 + 화이트밸런스 + 감마 →
+/// sRGB8(RGB). 반해상도(w/2 × h/2). 임베디드 JPEG과 달리 센서 전체 데이터에서 직접 현상해
+/// 재압축 손실이 없다. `raw` feature 전용. 실패 시 None.
+#[cfg(feature = "raw")]
+pub fn decode_raw_rgb8(path: &str) -> Option<(Vec<u8>, usize, usize)> {
+    let img = rawler::decode_file(path).ok()?;
+    let (w, h) = (img.width, img.height);
+    let raw = match &img.data {
+        rawler::RawImageData::Integer(d) => d,
+        _ => return None,
+    };
+    if raw.len() < w * h || w < 2 || h < 2 {
+        return None;
+    }
+    let cfa = &img.camera.cfa;
+    let bl = &img.blacklevel;
+    let (bw, bh) = (bl.width.max(1), bl.height.max(1));
+    let black = |x: usize, y: usize| -> f32 {
+        let r = &bl.levels[(y % bh) * bw + (x % bw)];
+        r.n as f32 / r.d.max(1) as f32
+    };
+    let white = *img.whitelevel.0.first().unwrap_or(&16383) as f32;
+    let wb = img.wb_coeffs;
+    let wg = if wb[1] > 0.0 { wb[1] } else { 1.0 };
+    let (wr, wbb) = (wb[0] / wg, wb[2] / wg);
+    let gamma = 1.0f32 / 2.2;
+    let (ow, oh) = (w / 2, h / 2);
+    let mut out = vec![0u8; ow * oh * 3];
+    for by in 0..oh {
+        for bx in 0..ow {
+            let (x, y) = (bx * 2, by * 2);
+            let mut acc = [0f32; 3];
+            let mut cnt = [0f32; 3];
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let (px, py) = (x + dx, y + dy);
+                    let c = cfa.color_at(py, px).min(2);
+                    let denom = white - black(px, py);
+                    let v = if denom > 0.0 {
+                        ((raw[py * w + px] as f32 - black(px, py)) / denom).max(0.0)
+                    } else {
+                        0.0
+                    };
+                    acc[c] += v;
+                    cnt[c] += 1.0;
+                }
+            }
+            let r = (acc[0] / cnt[0].max(1.0) * wr).clamp(0.0, 1.0);
+            let g = (acc[1] / cnt[1].max(1.0)).clamp(0.0, 1.0);
+            let b = (acc[2] / cnt[2].max(1.0) * wbb).clamp(0.0, 1.0);
+            let di = (by * ow + bx) * 3;
+            out[di] = (r.powf(gamma) * 255.0) as u8;
+            out[di + 1] = (g.powf(gamma) * 255.0) as u8;
+            out[di + 2] = (b.powf(gamma) * 255.0) as u8;
+        }
+    }
+    Some((out, ow, oh))
+}
+
 /// 프레임 전체 선명도 = 라플라시안 응답의 분산(값 클수록 선명). 성능 위해 2px 서브샘플.
 /// Lucky imaging(달·행성 대기 요동)에서 선명한 프레임만 골라내는 데 쓴다.
 pub fn sharpness(rgb: &[u8], w: usize, h: usize) -> f64 {
