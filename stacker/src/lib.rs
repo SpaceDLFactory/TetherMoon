@@ -400,6 +400,116 @@ pub fn estimate_rigid(reference: &[Star], cur: &[Star], tol: f32) -> Option<Rigi
 }
 
 /// 정렬 누적기. 첫 프레임을 기준으로 삼고 이후 프레임을 정합해 float 누적한다.
+/// 정렬 방식. 별 없는 대상(달·행성·지상)은 Stars가 못 잡으므로 Centroid/Roi를 쓴다.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Align {
+    /// 밝은 점 feature 매칭(회전+이동). 딥스카이/별밭.
+    Stars,
+    /// 프레임 밝기 무게중심으로 이동정렬. 어두운 배경의 밝은 단일 대상(행성·달).
+    Centroid,
+    /// 기준 프레임의 ROI 패치를 정규화상관(NCC)으로 매칭해 이동정렬. cx,cy,half는 0..1 정규화.
+    /// 사용자가 특징(크레이터·행성·건물)을 찍어 그 영역 기준으로 맞춘다. 달·행성·지상 범용.
+    Roi { cx: f32, cy: f32, half: f32 },
+}
+
+/// 밝기 무게중심(배경 평균 초과분 가중). 밝은 대상이 없으면 None.
+fn centroid(luma: &[f32], w: usize, h: usize) -> Option<(f32, f32)> {
+    let n = (w * h) as f32;
+    let mean = luma.iter().sum::<f32>() / n;
+    let (mut sx, mut sy, mut sw) = (0.0f32, 0.0f32, 0.0f32);
+    for y in 0..h {
+        for x in 0..w {
+            let v = (luma[y * w + x] - mean).max(0.0);
+            sx += x as f32 * v;
+            sy += y as f32 * v;
+            sw += v;
+        }
+    }
+    if sw > 0.0 {
+        Some((sx / sw, sy / sw))
+    } else {
+        None
+    }
+}
+
+/// 기준 luma의 (cx,cy) 중심 반경 half 패치를, cur luma에서 search 범위로 NCC 최대 위치를 찾아
+/// 이동 (dx,dy) 반환(cur ≈ ref + (dx,dy)). 패치/탐색이 경계를 벗어나면 후보 스킵.
+fn ncc_shift(
+    rl: &[f32],
+    cl: &[f32],
+    w: usize,
+    h: usize,
+    cx: usize,
+    cy: usize,
+    half: usize,
+    search: isize,
+) -> Option<(f32, f32)> {
+    if cx < half || cy < half || cx + half >= w || cy + half >= h {
+        return None;
+    }
+    // 기준 패치 평균/노름 사전계산.
+    let side = 2 * half + 1;
+    let mut rpatch = vec![0f32; side * side];
+    let mut rmean = 0.0;
+    for j in 0..side {
+        for i in 0..side {
+            let v = rl[(cy - half + j) * w + (cx - half + i)];
+            rpatch[j * side + i] = v;
+            rmean += v;
+        }
+    }
+    rmean /= (side * side) as f32;
+    let mut rnorm = 0.0;
+    for v in &rpatch {
+        rnorm += (v - rmean) * (v - rmean);
+    }
+    if rnorm <= 0.0 {
+        return None; // 균일 패치 → 매칭 불가
+    }
+    let rnorm = rnorm.sqrt();
+    let (mut best, mut bx, mut by) = (f32::MIN, 0isize, 0isize);
+    let (hi, wi, hh) = (half as isize, w as isize, h as isize);
+    for dy in -search..=search {
+        for dx in -search..=search {
+            let ox = cx as isize + dx;
+            let oy = cy as isize + dy;
+            if ox - hi < 0 || oy - hi < 0 || ox + hi >= wi || oy + hi >= hh {
+                continue;
+            }
+            // cur 패치 평균
+            let (ox, oy) = (ox as usize, oy as usize);
+            let mut cmean = 0.0;
+            for j in 0..side {
+                for i in 0..side {
+                    cmean += cl[(oy - half + j) * w + (ox - half + i)];
+                }
+            }
+            cmean /= (side * side) as f32;
+            let (mut num, mut cnorm) = (0.0f32, 0.0f32);
+            for j in 0..side {
+                for i in 0..side {
+                    let cv = cl[(oy - half + j) * w + (ox - half + i)] - cmean;
+                    num += (rpatch[j * side + i] - rmean) * cv;
+                    cnorm += cv * cv;
+                }
+            }
+            if cnorm > 0.0 {
+                let ncc = num / (rnorm * cnorm.sqrt());
+                if ncc > best {
+                    best = ncc;
+                    bx = dx;
+                    by = dy;
+                }
+            }
+        }
+    }
+    if best > f32::MIN {
+        Some((bx as f32, by as f32))
+    } else {
+        None
+    }
+}
+
 /// RGB f32 → luma f32.
 fn luma_f32(rgb: &[f32], w: usize, h: usize) -> Vec<f32> {
     let mut out = vec![0f32; w * h];
@@ -416,7 +526,10 @@ pub struct Stacker {
     mode: Mode,
     buf: Vec<f32>, // RGB 누적 (average=합, lighten=픽셀별 최대)
     wt: Vec<f32>,  // average용 픽셀별 기여수
-    reference: Option<Vec<Star>>,
+    align: Align,
+    reference: Option<Vec<Star>>,     // Stars 기준 별 목록
+    ref_luma: Option<Vec<f32>>,       // Roi 기준 프레임 luma
+    ref_centroid: Option<(f32, f32)>, // Centroid 기준 무게중심
     count: u32,
     linear: bool, // true면 입력이 선형광(f32), 렌더 시 감마 적용
 }
@@ -432,6 +545,12 @@ impl Stacker {
         Self::make(w, h, mode, true)
     }
 
+    /// 정렬 방식 지정(기본 Stars). 첫 add 전에 호출. new(...).with_align(Align::Centroid) 식.
+    pub fn with_align(mut self, align: Align) -> Self {
+        self.align = align;
+        self
+    }
+
     fn make(w: usize, h: usize, mode: Mode, linear: bool) -> Self {
         Self {
             w,
@@ -439,7 +558,10 @@ impl Stacker {
             mode,
             buf: vec![0.0; w * h * 3],
             wt: vec![0.0; w * h],
+            align: Align::Stars,
             reference: None,
+            ref_luma: None,
+            ref_centroid: None,
             count: 0,
             linear,
         }
@@ -469,18 +591,53 @@ impl Stacker {
     }
 
     fn add_common(&mut self, rgb: &[f32], luma: &[f32]) -> bool {
-        let stars = detect_stars(luma, self.w, self.h, 16, 8.0);
-        let tf = match &self.reference {
-            Some(ref_stars) => match estimate_rigid(ref_stars, &stars, 6.0) {
-                Some(t) => t,
-                None => return false, // 정합 실패(별 부족/불량 프레임) → 기각
-            },
-            None => {
-                if stars.len() < 3 {
-                    return false; // 기준 프레임에 별 3개 미만이면 시작 안 함
+        let (w, h) = (self.w, self.h);
+        let tf = match self.align {
+            Align::Stars => {
+                let stars = detect_stars(luma, w, h, 16, 8.0);
+                match &self.reference {
+                    Some(rs) => match estimate_rigid(rs, &stars, 6.0) {
+                        Some(t) => t,
+                        None => return false, // 정합 실패 → 기각
+                    },
+                    None => {
+                        if stars.len() < 3 {
+                            return false; // 기준에 별 3개 미만이면 시작 안 함
+                        }
+                        self.reference = Some(stars);
+                        Rigid::identity()
+                    }
                 }
-                self.reference = Some(stars);
-                Rigid::identity()
+            }
+            Align::Centroid => {
+                let c = match centroid(luma, w, h) {
+                    Some(c) => c,
+                    None => return false,
+                };
+                match self.ref_centroid {
+                    Some(rc) => Rigid { cos: 1.0, sin: 0.0, tx: c.0 - rc.0, ty: c.1 - rc.1 },
+                    None => {
+                        self.ref_centroid = Some(c);
+                        Rigid::identity()
+                    }
+                }
+            }
+            Align::Roi { cx, cy, half } => {
+                let px = (cx.clamp(0.0, 1.0) * w as f32) as usize;
+                let py = (cy.clamp(0.0, 1.0) * h as f32) as usize;
+                // 패치/탐색 크기는 성능 위해 캡(등록엔 작은 특징 패치로 충분).
+                let hp = ((half * w as f32) as usize).clamp(6, 48);
+                let search = 24isize;
+                match &self.ref_luma {
+                    Some(rl) => match ncc_shift(rl, luma, w, h, px, py, hp, search) {
+                        Some((dx, dy)) => Rigid { cos: 1.0, sin: 0.0, tx: dx, ty: dy },
+                        None => return false,
+                    },
+                    None => {
+                        self.ref_luma = Some(luma.to_vec());
+                        Rigid::identity()
+                    }
+                }
             }
         };
         self.accumulate(rgb, tf);
@@ -671,6 +828,71 @@ mod tests {
         // 감마로 어두운 배경(0.02)이 들려야: 선형이면 ~5, 감마면 ~42.
         let bg = at(0, 0);
         assert!(bg > 25 && bg < 60, "gamma-lifted bg {}", bg);
+    }
+
+    #[test]
+    fn centroid_aligns_bright_blob() {
+        // 별 없는 밝은 원반(달·행성 흉내). Stars론 못 잡지만 Centroid는 무게중심으로 정렬.
+        let (w, h) = (64usize, 48usize);
+        let disk = |cx: i32, cy: i32| {
+            let mut f = vec![10u8; w * h * 3];
+            for y in 0..h as i32 {
+                for x in 0..w as i32 {
+                    if (x - cx) * (x - cx) + (y - cy) * (y - cy) < 64 {
+                        let i = ((y as usize) * w + x as usize) * 3;
+                        f[i] = 230;
+                        f[i + 1] = 230;
+                        f[i + 2] = 230;
+                    }
+                }
+            }
+            f
+        };
+        let a = disk(30, 24);
+        let b = disk(34, 22); // +(4,-2)
+        let mut st = Stacker::new(w, h, Mode::Average).with_align(Align::Centroid);
+        assert!(st.add(&a));
+        assert!(st.add(&b), "centroid 정합");
+        assert_eq!(st.count(), 2);
+        let out = st.render();
+        assert!(out[(24 * w + 30) * 3] as i32 > 200, "aligned disk {}", out[(24 * w + 30) * 3]);
+    }
+
+    #[test]
+    fn roi_aligns_textured_patch() {
+        // 별 없는 텍스처 + 밝은 특징. ROI 패치를 NCC로 매칭해 이동정렬.
+        let (w, h) = (80usize, 64usize);
+        let base = |x: i32, y: i32| -> u8 {
+            let t = (((x * 7 + y * 13) & 0x3f) + 20) as u8;
+            let sq = if (x - 30).abs() < 5 && (y - 30).abs() < 5 { 180u8 } else { 0 };
+            t.saturating_add(sq)
+        };
+        let frame = |sx: i32, sy: i32| {
+            let mut f = vec![0u8; w * h * 3];
+            for y in 0..h as i32 {
+                for x in 0..w as i32 {
+                    let v = base(x - sx, y - sy);
+                    let i = ((y as usize) * w + x as usize) * 3;
+                    f[i] = v;
+                    f[i + 1] = v;
+                    f[i + 2] = v;
+                }
+            }
+            f
+        };
+        let a = frame(0, 0);
+        let b = frame(3, -2); // 씬 +(3,-2)
+        let mut st = Stacker::new(w, h, Mode::Average).with_align(Align::Roi {
+            cx: 30.0 / w as f32,
+            cy: 30.0 / h as f32,
+            half: 8.0 / w as f32,
+        });
+        assert!(st.add(&a));
+        assert!(st.add(&b), "roi 정합");
+        assert_eq!(st.count(), 2);
+        let out = st.render();
+        // 기준 위치(30,30)의 밝은 특징이 정렬 평균 후에도 밝아야.
+        assert!(out[(30 * w + 30) * 3] as i32 > 150, "aligned feature {}", out[(30 * w + 30) * 3]);
     }
 
     #[test]
