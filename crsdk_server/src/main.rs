@@ -1178,7 +1178,8 @@ fn decode_to_rgb8(path: &std::path::Path, bytes: &[u8]) -> Option<(Vec<u8>, usiz
 struct FolderStackReq {
     mode: Option<String>,
     limit: Option<usize>,
-    dir: Option<String>, // 스택할 폴더(생략 시 저장 폴더)
+    dir: Option<String>,  // 스택할 폴더(생략 시 저장 폴더)
+    best: Option<f32>,    // lucky imaging: 선명한 상위 비율(0~1)만 스택. 생략=전부
 }
 
 /// 저장 폴더의 최근 촬영 프레임을 풀해상도로 포스트스택한다(라이브뷰보다 고화질). 파일을
@@ -1206,6 +1207,7 @@ async fn stack_folder(State(s): State<AppState>, Json(b): Json<FolderStackReq>) 
         _ => stacker::Mode::Average,
     };
     let limit = b.limit.unwrap_or(30).clamp(2, 200);
+    let best = b.best;
     s.stack_count.store(0, Ordering::SeqCst);
     s.stack_cancel.store(false, Ordering::SeqCst);
     *s.stack_preview.lock().await = None;
@@ -1231,8 +1233,31 @@ async fn stack_folder(State(s): State<AppState>, Json(b): Json<FolderStackReq>) 
             })
             .collect();
         files.sort_by(|a, b| b.0.cmp(&a.0)); // 최신 먼저
-        files.truncate(limit);
-        files.reverse(); // 오래된→최신 (첫 장이 정렬 기준)
+        files.truncate(limit); // 최근 limit장(버스트)
+        // lucky imaging: 버스트 중 선명한 상위 비율만 선별(달·행성 대기 요동 극복).
+        match best {
+            Some(frac) if frac > 0.0 && frac < 1.0 => {
+                let mut scored: Vec<(f64, std::path::PathBuf)> = files
+                    .iter()
+                    .filter_map(|(_, p)| {
+                        let bytes = std::fs::read(p).ok()?;
+                        let (rgb, w, h) = decode_to_rgb8(p, &bytes)?;
+                        Some((stacker::sharpness(&rgb, w, h), p.clone()))
+                    })
+                    .collect();
+                scored.sort_by(|a, b| {
+                    b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let keep = ((scored.len() as f32 * frac).ceil() as usize).max(2);
+                scored.truncate(keep);
+                // 선명한 순서 유지 → 가장 선명한 프레임이 정렬 기준.
+                files = scored
+                    .into_iter()
+                    .map(|(_, p)| (std::time::SystemTime::UNIX_EPOCH, p))
+                    .collect();
+            }
+            _ => files.reverse(), // 일반: 오래된→최신 (첫 장이 정렬 기준)
+        }
         let mut stk: Option<stacker::Stacker> = None;
         let mut dims: Option<(usize, usize)> = None;
         for (_, path) in &files {

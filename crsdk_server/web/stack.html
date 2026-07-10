@@ -87,8 +87,15 @@
     <span style="flex:1"></span>
     <input id="dir" type="text" placeholder="folder (blank = save folder)" title="Folder to post-stack; blank uses the camera save folder"
            style="width:180px;background:var(--bg-3);color:var(--fg);border:1px solid var(--border);border-radius:8px;padding:8px;">
-    <input id="limit" type="number" min="2" max="200" value="30" title="Frames to post-stack"
+    <input id="limit" type="number" min="2" max="200" value="30" title="Frames to consider"
            style="width:60px;background:var(--bg-3);color:var(--fg);border:1px solid var(--border);border-radius:8px;padding:8px;">
+    <select id="best" title="Lucky imaging: keep only the sharpest fraction (for moon/planets through turbulence)"
+            style="background:var(--bg-3);color:var(--fg);border:1px solid var(--border);border-radius:8px;padding:8px;">
+      <option value="">All frames</option>
+      <option value="0.75">Best 75%</option>
+      <option value="0.5">Best 50%</option>
+      <option value="0.25">Best 25%</option>
+    </select>
     <button class="nav" id="folderBtn" type="button" title="Stack the most recent captures at full resolution (JPEG; ARW uses its embedded preview)">Post-stack saved ▶</button>
   </div>
   <div class="hint">
@@ -150,13 +157,14 @@
   });
 
   // 저장 프레임 풀해상도 포스트스택 (라이브뷰보다 고화질). 진행은 status/preview 폴링으로.
-  const folderBtn = $('#folderBtn'), limitEl = $('#limit'), dirEl = $('#dir');
+  const folderBtn = $('#folderBtn'), limitEl = $('#limit'), dirEl = $('#dir'), bestEl = $('#best');
   folderBtn.addEventListener('click', async () => {
     if (running) return;
     try {
       const r = await fetch('/api/stack/folder', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ mode: modeSel.value, limit: parseInt(limitEl.value,10) || 30, dir: dirEl.value.trim() || undefined }) });
+        body: JSON.stringify({ mode: modeSel.value, limit: parseInt(limitEl.value,10) || 30,
+          dir: dirEl.value.trim() || undefined, best: bestEl.value ? parseFloat(bestEl.value) : undefined }) });
       if (!r.ok) { toast('Post-stack: ' + (await r.text())); return; }
       toast('Post-stacking saved frames…'); setUI(true);
     } catch (e) { toast('Post-stack 실패'); }

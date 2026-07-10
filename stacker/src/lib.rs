@@ -32,6 +32,37 @@ pub fn luma_from_rgb(rgb: &[u8], w: usize, h: usize) -> Vec<f32> {
     out
 }
 
+/// 프레임 전체 선명도 = 라플라시안 응답의 분산(값 클수록 선명). 성능 위해 2px 서브샘플.
+/// Lucky imaging(달·행성 대기 요동)에서 선명한 프레임만 골라내는 데 쓴다.
+pub fn sharpness(rgb: &[u8], w: usize, h: usize) -> f64 {
+    if w < 3 || h < 3 || rgb.len() < w * h * 3 {
+        return 0.0;
+    }
+    let lum = |x: usize, y: usize| -> f64 {
+        let i = (y * w + x) * 3;
+        0.299 * rgb[i] as f64 + 0.587 * rgb[i + 1] as f64 + 0.114 * rgb[i + 2] as f64
+    };
+    let (mut sum, mut sumsq, mut n) = (0.0, 0.0, 0.0);
+    let mut y = 1;
+    while y < h - 1 {
+        let mut x = 1;
+        while x < w - 1 {
+            let lap = -4.0 * lum(x, y) + lum(x - 1, y) + lum(x + 1, y) + lum(x, y - 1)
+                + lum(x, y + 1);
+            sum += lap;
+            sumsq += lap * lap;
+            n += 1.0;
+            x += 2;
+        }
+        y += 2;
+    }
+    if n < 1.0 {
+        return 0.0;
+    }
+    let mean = sum / n;
+    (sumsq / n - mean * mean).max(0.0)
+}
+
 /// 밝은 별 최대 `max_stars`개 검출. 임계 = mean + 4·std, 3x3 국소최대, 반경 3 창의
 /// 밝기가중 서브픽셀 centroid, flux 내림차순 + 최소 간격 `min_sep`로 솎음.
 pub fn detect_stars(luma: &[f32], w: usize, h: usize, max_stars: usize, min_sep: f32) -> Vec<Star> {
@@ -504,6 +535,14 @@ mod tests {
         let mut st = Stacker::new(64, 48, Mode::Average);
         assert!(!st.add(&blank), "별 없는 프레임은 기준으로 시작 안 함");
         assert_eq!(st.count(), 0);
+    }
+
+    #[test]
+    fn sharpness_ranks_sharp_over_flat() {
+        let sharp = frame(64, 48, &[(20, 20), (40, 30), (10, 8)]);
+        let flat = vec![60u8; 64 * 48 * 3]; // 균일 → 라플라시안 ~0
+        assert!(sharpness(&sharp, 64, 48) > sharpness(&flat, 64, 48));
+        assert!(sharpness(&flat, 64, 48) < 1.0);
     }
 
     #[test]
