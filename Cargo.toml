@@ -1,5 +1,5 @@
 [workspace]
-members = ["crsdk_server", "detector"]
+members = ["crsdk_server", "detector", "stacker"]
 
 [package]
 name = "crsdk"
