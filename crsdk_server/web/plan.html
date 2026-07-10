@@ -37,10 +37,20 @@
   th{color:var(--fg-dim);font-size:11px;font-weight:600;letter-spacing:.04em;}
   td.alt{font-weight:700;} .up{color:var(--good);} .low{color:var(--warn);} .below{color:var(--fg-mute);}
   .name{font-weight:600;} .del{color:var(--fg-mute);cursor:pointer;border:none;background:none;font-size:14px;}
-  .altbar{height:6px;background:var(--bg-3);border-radius:3px;overflow:hidden;margin-top:3px;width:120px;}
-  .altbar>div{height:100%;background:var(--accent);}
   .add{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 12px;border-top:1px solid var(--border);}
   .hint{color:var(--fg-mute);font-size:11px;padding:8px 12px;}
+  /* 요약 카드 */
+  .best{padding:12px;display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;}
+  .card{background:var(--bg-2);border:1px solid var(--border);border-radius:12px;padding:12px 14px;position:relative;}
+  .card .cn{font-weight:700;font-size:15px;}
+  .card .ca{font-size:28px;font-weight:800;font-variant-numeric:tabular-nums;margin-top:2px;}
+  .card .ca .u{font-size:14px;font-weight:600;color:var(--fg-dim);}
+  .card .cd{color:var(--fg-dim);font-size:13px;margin-top:1px;}
+  .card.lowc .ca{color:var(--warn);}
+  .card .x{position:absolute;top:8px;right:10px;color:var(--fg-mute);cursor:pointer;font-size:13px;}
+  .empty{padding:24px 14px;color:var(--fg-mute);text-align:center;}
+  details>summary{padding:10px 12px;color:var(--fg-dim);font-size:13px;cursor:pointer;border-top:1px solid var(--border);}
+  .sec{padding:10px 12px 2px;color:var(--fg-dim);font-size:12px;font-weight:600;letter-spacing:.04em;}
 </style>
 </head>
 <body>
@@ -62,10 +72,15 @@
     <button class="nav" id="nowBtn">Now</button>
   </div>
 
-  <table>
-    <thead><tr><th>Target</th><th>Alt</th><th>Dir</th><th>Status</th><th></th></tr></thead>
-    <tbody id="rows"></tbody>
-  </table>
+  <div class="sec" id="bestSec">Good right now</div>
+  <div class="best" id="best"></div>
+  <details id="allWrap">
+    <summary>All targets</summary>
+    <table>
+      <thead><tr><th>Target</th><th>Alt</th><th>Dir</th><th>Status</th><th></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </details>
 
   <div class="add">
     <span style="color:var(--fg-dim);font-size:12px;">Add target:</span>
@@ -189,25 +204,44 @@
   function loc(){ return { lat:parseFloat($('#lat').value), lon:parseFloat($('#lon').value) }; }
   function when(){ const dt=new Date(Date.now()+offsetH*3600e3); return dt; }
 
+  function removeCustom(name){ custom=custom.filter(t=>t.name!==name); saveCustom(); render(); }
+  function card(r){
+    const low=r.alt<=25, isC=custom.some(t=>t.name===r.name);
+    return `<div class="card${low?' lowc':''}">`+
+      (isC?`<span class="x" data-n="${r.name}" title="remove">✕</span>`:'')+
+      `<div class="cn">${r.name}</div>`+
+      `<div class="ca">${r.alt.toFixed(0)}<span class="u">° alt</span></div>`+
+      `<div class="cd">${compass(r.az)} · ${r.az.toFixed(0)}°</div></div>`;
+  }
   function render(){
     const {lat,lon}=loc();
     const dt=when();
     $('#when').textContent = offsetH===0 ? 'now' : (offsetH>0?'+':'')+offsetH+'h · '+dt.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
-    const tb=$('#rows'); tb.innerHTML='';
-    if(!isFinite(lat)||!isFinite(lon)){ tb.innerHTML='<tr><td colspan="5" style="color:var(--fg-mute)">Enter your latitude &amp; longitude.</td></tr>'; return; }
+    const bestEl=$('#best'), tb=$('#rows'), sec=$('#bestSec'), wrap=$('#allWrap');
+    if(!isFinite(lat)||!isFinite(lon)){
+      sec.style.display='none'; wrap.style.display='none'; tb.innerHTML='';
+      bestEl.innerHTML='<div class="empty">📍 Set your location to see what\'s up tonight.</div>';
+      return;
+    }
+    sec.style.display=''; wrap.style.display='';
     const rows=computeAll(dt,lat,lon).sort((a,b)=>b.alt-a.alt);
+    // 요약: 잘 뜬(고도>15°) 대상만 카드로.
+    const best=rows.filter(r=>r.alt>15);
+    bestEl.innerHTML = best.length
+      ? best.map(card).join('')
+      : '<div class="empty">Nothing well placed right now — try +1h to move toward night.</div>';
+    bestEl.querySelectorAll('.x').forEach(x=>x.addEventListener('click',()=>removeCustom(x.dataset.n)));
+    // 접힌 전체 목록.
+    tb.innerHTML='';
     for(const r of rows){
-      const up=r.alt>25, low=r.alt>0&&r.alt<=25;
-      const cls=up?'up':(low?'low':'below');
+      const up=r.alt>25, low=r.alt>0&&r.alt<=25, cls=up?'up':(low?'low':'below');
       const status=r.alt<=0?'below horizon':(up?'well placed':'low');
-      const isCustom=custom.some(t=>t.name===r.name);
+      const isC=custom.some(t=>t.name===r.name);
       const tr=document.createElement('tr');
-      tr.innerHTML=`<td class="name">${r.name}</td>`+
-        `<td class="alt ${cls}">${r.alt.toFixed(0)}°<div class="altbar"><div style="width:${Math.max(0,Math.min(100,r.alt/90*100))}%"></div></div></td>`+
-        `<td>${r.alt>0?compass(r.az)+' '+r.az.toFixed(0)+'°':'—'}</td>`+
-        `<td class="${cls}">${status}</td>`+
-        `<td>${isCustom?'<button class="del" title="remove">✕</button>':''}</td>`;
-      if(isCustom) tr.querySelector('.del').addEventListener('click',()=>{ custom=custom.filter(t=>t.name!==r.name); saveCustom(); render(); });
+      tr.innerHTML=`<td class="name">${r.name}</td><td class="alt ${cls}">${r.alt.toFixed(0)}°</td>`+
+        `<td>${r.alt>0?compass(r.az):'—'}</td><td class="${cls}">${status}</td>`+
+        `<td>${isC?'<button class="del" title="remove">✕</button>':''}</td>`;
+      if(isC) tr.querySelector('.del').addEventListener('click',()=>removeCustom(r.name));
       tb.appendChild(tr);
     }
   }
