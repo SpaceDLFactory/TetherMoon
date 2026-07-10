@@ -10,7 +10,7 @@
       'guide.step3':'It connects automatically — no button to press.',
       'guide.note':'Still nothing? Make sure the camera is powered on and the USB cable supports data (not charge-only).',
       'grid.thirds':'Rule of thirds','grid.persp':'Perspective','grid.diag':'Diagonal',
-      'title.zoom':'100% focus check (click = point)','title.grid':'Toggle grid','title.rotate':'Rotate live view',
+      'title.zoom':'100% focus check (click = point)','title.grid':'Toggle grid','title.rotate':'Rotate live view','title.night':'Night vision (red)',
       'card.histogram':'Histogram','card.exposure':'Exposure','card.fileformat':'File Format','card.pictureprofile':'Picture Profile',
       'card.bulb':'Bulb Timer','card.interval':'Interval (Timelapse)','card.drivemetering':'Drive · Metering','card.focus':'Focus Mode','card.saveto':'Save To','card.recent':'Recent',
       'lbl.colortemp':'Color temp','lbl.expsec':'Exposure (s)','lbl.intervalsec':'Interval (s)','lbl.count':'Count','lbl.afarea':'AF area',
@@ -33,7 +33,7 @@
       'guide.step3':'자동으로 연결됩니다 — 버튼 누를 필요 없어요.',
       'guide.note':'그래도 안 되면? 카메라 전원이 켜져 있고, USB 케이블이 데이터 지원(충전 전용 아님)인지 확인하세요.',
       'grid.thirds':'3분할','grid.persp':'소실점','grid.diag':'대각선',
-      'title.zoom':'100% 확대 초점확인 (클릭=지점 선택)','title.grid':'3분할 그리드 토글','title.rotate':'라이브뷰 회전',
+      'title.zoom':'100% 확대 초점확인 (클릭=지점 선택)','title.grid':'3분할 그리드 토글','title.rotate':'라이브뷰 회전','title.night':'야간 모드 (붉은 화면)',
       'card.histogram':'히스토그램','card.exposure':'노출','card.fileformat':'파일 형식','card.pictureprofile':'픽처 프로파일',
       'card.bulb':'벌브 타이머','card.interval':'인터벌 (타임랩스)','card.drivemetering':'드라이브 · 측광','card.focus':'포커스 모드','card.saveto':'저장 위치','card.recent':'최근',
       'lbl.colortemp':'색온도','lbl.expsec':'노출(초)','lbl.intervalsec':'간격(초)','lbl.count':'장수','lbl.afarea':'AF 영역',
@@ -56,7 +56,7 @@
       'guide.step3':'自動的に接続されます — ボタン操作は不要です。',
       'guide.note':'それでも接続できない場合：カメラの電源が入っていること、USB ケーブルがデータ対応（充電専用でない）であることを確認してください。',
       'grid.thirds':'三分割','grid.persp':'消失点','grid.diag':'対角線',
-      'title.zoom':'100% 拡大ピント確認（クリック＝位置）','title.grid':'三分割グリッド切替','title.rotate':'ライブビュー回転',
+      'title.zoom':'100% 拡大ピント確認（クリック＝位置）','title.grid':'三分割グリッド切替','title.rotate':'ライブビュー回転','title.night':'ナイトモード（赤い画面）',
       'card.histogram':'ヒストグラム','card.exposure':'露出','card.fileformat':'ファイル形式','card.pictureprofile':'ピクチャープロファイル',
       'card.bulb':'バルブタイマー','card.interval':'インターバル（タイムラプス）','card.drivemetering':'ドライブ・測光','card.focus':'フォーカスモード','card.saveto':'保存先','card.recent':'最近',
       'lbl.colortemp':'色温度','lbl.expsec':'露出(秒)','lbl.intervalsec':'間隔(秒)','lbl.count':'枚数','lbl.afarea':'AF エリア',
@@ -1177,6 +1177,19 @@
   // 라이브뷰 원본(lvImg.natural*) 픽셀을 1:1로 크롭해 캔버스에 그려 진짜 100% 확인.
   // CSS transform과 얽히지 않게 별도 캔버스, 회전은 applyRot이 동일 변환 적용.
   // 줌 모드 중 라이브뷰 클릭 = 확대 지점 선택(lfx/lfy, AF 아님 — 클릭 핸들러 참조).
+  // 붉은 야간 모드: html.night 토글 → 전체 화면 저휘도 red(암순응 보존). localStorage 유지.
+  const nightBtn = document.getElementById('nightBtn');
+  const applyNight = (on) => {
+    document.body.classList.toggle('night', on);
+    nightBtn.classList.toggle('on', on);
+  };
+  applyNight(localStorage.getItem('night') === '1');
+  nightBtn.addEventListener('click', () => {
+    const on = !document.body.classList.contains('night');
+    applyNight(on);
+    localStorage.setItem('night', on ? '1' : '0');
+  });
+
   const zoomBtn = document.getElementById('zoomBtn');
   const loupeCanvas = document.getElementById('loupeCanvas');
   const lctx = loupeCanvas.getContext('2d');

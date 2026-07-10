@@ -73,6 +73,9 @@
     padding: 8px 14px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none;
   }
   .toast.show { opacity: 1; }
+  /* 붉은 야간 모드: 필드 촬영 시 눈 암순응 보존. index.html과 동일 필터. */
+  body.night { filter: brightness(0.62) sepia(1) saturate(4) hue-rotate(-48deg); }
+  button.nav.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 </style>
 </head>
 <body>
@@ -81,6 +84,7 @@
     <span class="model" id="model">—</span>
     <span id="bat" style="color:var(--fg-dim)"></span>
     <span class="sp"></span>
+    <button class="nav" id="nightBtn" type="button" title="야간 모드 (붉은 화면)">🌙</button>
     <a class="nav" href="/web/index.html">미리보기 ↗</a>
   </div>
 
@@ -241,6 +245,16 @@
       $('#bat').textContent = p.battery ? '· BAT ' + p.battery.value + '%' : '';
     } catch {}
   };
+
+  // 붉은 야간 모드 (index.html과 localStorage 'night' 공유 → 페이지 간 자동 동기화)
+  const nightBtn = $('#nightBtn');
+  const applyNight = on => { document.body.classList.toggle('night', on); nightBtn.classList.toggle('on', on); };
+  applyNight(localStorage.getItem('night') === '1');
+  nightBtn.addEventListener('click', () => {
+    const on = !document.body.classList.contains('night');
+    applyNight(on);
+    localStorage.setItem('night', on ? '1' : '0');
+  });
 
   refreshThumb();
   setInterval(refreshThumb, 4000);   // 새 컷 자동 반영 (라이브뷰 없으니 가벼운 폴링)
