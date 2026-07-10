@@ -1145,6 +1145,35 @@ async fn stack_preview(State(s): State<AppState>) -> Response {
     }
 }
 
+#[derive(serde::Deserialize)]
+struct StackSaveReq {
+    dir: Option<String>,
+}
+
+/// 현재 스택본(stack_preview JPEG)을 저장폴더(또는 dir)에 STACK_<epoch>.jpg로 저장.
+async fn stack_save(State(s): State<AppState>, Json(b): Json<StackSaveReq>) -> impl IntoResponse {
+    let jpeg = match s.stack_preview.lock().await.clone() {
+        Some(j) => j,
+        None => return (StatusCode::NOT_FOUND, "no stack to save".to_string()),
+    };
+    let dir = match b.dir {
+        Some(d) if !d.trim().is_empty() => d,
+        _ => s.save_path.lock().await.clone(),
+    };
+    if dir.is_empty() {
+        return (StatusCode::BAD_REQUEST, "no folder (set save path or pass dir)".to_string());
+    }
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = std::path::Path::new(&dir).join(format!("STACK_{secs}.jpg"));
+    match tokio::fs::write(&path, &jpeg).await {
+        Ok(_) => (StatusCode::OK, path.to_string_lossy().to_string()),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("save: {e}")),
+    }
+}
+
 /// 저장 파일 한 장을 RGB8로 디코드. JPEG/HEIF는 직접, RAW(.arw)는 임베디드 JPEG로.
 /// (진짜 RAW 디코드 = 16bit 선형은 추후 stacker `raw` feature의 rawloader로 대체.)
 fn decode_to_rgb8(path: &std::path::Path, bytes: &[u8]) -> Option<(Vec<u8>, usize, usize)> {
@@ -2788,6 +2817,7 @@ async fn main() {
         .route("/api/stack/status", get(stack_status))
         .route("/api/stack/preview", get(stack_preview))
         .route("/api/stack/folder", post(stack_folder)) // 저장 프레임 풀해상도 포스트스택
+        .route("/api/stack/save", post(stack_save)) // 스택 결과 PC 저장
         .route("/api/_debug/level", get(level_info))
         .route("/api/_debug/afframe", get(af_frame_info))
         .route("/api/shutter/down", post(shutter_down))

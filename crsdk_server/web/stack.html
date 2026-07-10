@@ -152,8 +152,16 @@
     } catch (e) { toast('Stack 시작 실패'); }
   });
 
-  saveBtn.addEventListener('click', () => {
-    window.open('/api/stack/preview?t=' + Date.now(), '_blank'); // 새 탭 → 길게 눌러 저장
+  saveBtn.addEventListener('click', async () => {
+    try {
+      const r = await fetch('/api/stack/save', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ dir: (document.querySelector('#dir').value || '').trim() || undefined }) });
+      const txt = await r.text();
+      if (r.ok) toast('Saved: ' + txt.split('/').pop());
+      else if (r.status === 400) { window.open('/api/stack/preview?t=' + Date.now(), '_blank'); } // 폴더 없으면 새 탭
+      else toast('Save: ' + txt);
+    } catch (e) { toast('Save 실패'); }
   });
 
   // 저장 프레임 풀해상도 포스트스택 (라이브뷰보다 고화질). 진행은 status/preview 폴링으로.
