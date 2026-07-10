@@ -190,6 +190,10 @@ struct AppState {
     af_target: Arc<std::sync::Mutex<(f64, f64, f64, f64)>>, // 추적AF 대상 ROI(cx,cy,w,h) — retarget이 갱신, 연속 루프가 매 사이클 관측
     me_active: Arc<std::sync::atomic::AtomicBool>, // 다중노출 시퀀스 진행중 (중복 트리거 방지)
     connecting: Arc<std::sync::atomic::AtomicBool>, // 연결 시도 진행중 (동시 connect 직렬화)
+    stack_active: Arc<std::sync::atomic::AtomicBool>, // 라이브스택 세션 진행중 (단일 실행 가드)
+    stack_cancel: Arc<std::sync::atomic::AtomicBool>, // 라이브스택 정지 신호
+    stack_count: Arc<std::sync::atomic::AtomicU32>, // 현재까지 누적된 프레임 수
+    stack_preview: Arc<Mutex<Option<Vec<u8>>>>, // 최신 스택본 JPEG (프리뷰 폴링용)
     #[cfg(feature = "detector")]
     detector: Option<Arc<detector::Detector>>, // RT-DETR CoreML(추적AF, 옵셔널). 모델 미로드시 None
 }
@@ -992,6 +996,152 @@ async fn focus_score(State(s): State<AppState>, Json(b): Json<FocusScoreReq>) ->
             Json(serde_json::json!({ "score": score, "x": x, "y": y })).into_response()
         }
         _ => (StatusCode::NOT_FOUND, "no measurable point").into_response(),
+    }
+}
+
+// ── 라이브 스택 (별 정렬 + 프레임 누적) ────────────────────────────────────
+#[derive(serde::Deserialize)]
+struct StackReq {
+    mode: Option<String>, // "average"(기본) | "lighten"
+}
+
+/// 라이브스택 시작: 라이브뷰 프레임을 구독해 별 정렬 후 누적하고, 최신 스택본을 주기적으로
+/// JPEG로 렌더해 stack_preview에 보관한다. 모든 CPU 작업(디코드/정렬/누적/인코드)은 blocking
+/// 스레드에서 수행. 라이브뷰 프로듀서가 꺼져 있으면 함께 시작한다.
+async fn stack_start(State(s): State<AppState>, Json(b): Json<StackReq>) -> impl IntoResponse {
+    use std::sync::atomic::Ordering;
+    let handle = {
+        let g = s.camera.lock().await;
+        match &*g {
+            Some(c) => c.0.device_handle(),
+            None => return (StatusCode::SERVICE_UNAVAILABLE, "not connected".to_string()),
+        }
+    };
+    if s
+        .stack_active
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return (StatusCode::CONFLICT, "stack already running".to_string());
+    }
+    s.stack_cancel.store(false, Ordering::SeqCst);
+    s.stack_count.store(0, Ordering::SeqCst);
+    *s.stack_preview.lock().await = None;
+
+    // 라이브뷰 프로듀서 보장(정지 상태면 시작) — liveview() 스타터와 동일.
+    {
+        let mut running = s.lv_running.lock().unwrap_or_else(|e| e.into_inner());
+        if !*running {
+            *running = true;
+            let lv_tx = s.lv_tx.clone();
+            let running_c = s.lv_running.clone();
+            let cam = s.camera.clone();
+            tokio::task::spawn_blocking(move || lv_producer(handle, lv_tx, running_c, cam));
+        }
+    }
+
+    let mode = match b.mode.as_deref() {
+        Some("lighten") => stacker::Mode::Lighten,
+        _ => stacker::Mode::Average,
+    };
+    let guard = RunGuard(s.stack_active.clone());
+    let cancel = s.stack_cancel.clone();
+    let count = s.stack_count.clone();
+    let preview = s.stack_preview.clone();
+    let lv_tx = s.lv_tx.clone();
+    tokio::task::spawn_blocking(move || {
+        let _g = guard; // 종료 시 stack_active 해제
+        let mut rx = lv_tx.subscribe();
+        let mut stk: Option<stacker::Stacker> = None;
+        let mut dims: Option<(usize, usize)> = None;
+        let mut last_render = std::time::Instant::now();
+        let encode = |rgb: &[u8], w: usize, h: usize| -> Option<Vec<u8>> {
+            let mut out = Vec::new();
+            jpeg_encoder::Encoder::new(&mut out, 88)
+                .encode(rgb, w as u16, h as u16, jpeg_encoder::ColorType::Rgb)
+                .ok()?;
+            Some(out)
+        };
+        loop {
+            if cancel.load(Ordering::SeqCst) {
+                break;
+            }
+            let frame = match rx.blocking_recv() {
+                Ok(f) => f,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            };
+            let mut dec = jpeg_decoder::Decoder::new(std::io::Cursor::new(&frame[..]));
+            let px = match dec.decode() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let info = match dec.info() {
+                Some(i) => i,
+                None => continue,
+            };
+            let (w, h) = (info.width as usize, info.height as usize);
+            let rgb = match info.pixel_format {
+                jpeg_decoder::PixelFormat::RGB24 => px,
+                jpeg_decoder::PixelFormat::L8 => {
+                    let mut r = vec![0u8; w * h * 3];
+                    for i in 0..w * h {
+                        r[i * 3] = px[i];
+                        r[i * 3 + 1] = px[i];
+                        r[i * 3 + 2] = px[i];
+                    }
+                    r
+                }
+                _ => continue,
+            };
+            match dims {
+                None => {
+                    dims = Some((w, h));
+                    stk = Some(stacker::Stacker::new(w, h, mode));
+                }
+                Some((sw, sh)) if sw == w && sh == h => {}
+                Some(_) => continue, // 해상도 바뀐 프레임은 스킵
+            }
+            let st = stk.as_mut().unwrap();
+            if st.add(&rgb) {
+                count.store(st.count(), Ordering::SeqCst);
+                if last_render.elapsed() >= std::time::Duration::from_millis(400) {
+                    if let Some(jpeg) = encode(&st.render(), w, h) {
+                        *preview.blocking_lock() = Some(jpeg);
+                    }
+                    last_render = std::time::Instant::now();
+                }
+            }
+        }
+        // 종료 시 최종 렌더 반영.
+        if let (Some(st), Some((w, h))) = (&stk, dims) {
+            if let Some(jpeg) = encode(&st.render(), w, h) {
+                *preview.blocking_lock() = Some(jpeg);
+            }
+        }
+        tracing::info!("stack ended ({} frames)", count.load(Ordering::SeqCst));
+    });
+    (StatusCode::OK, "stack started".to_string())
+}
+
+async fn stack_stop(State(s): State<AppState>) -> impl IntoResponse {
+    s.stack_cancel
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    (StatusCode::OK, "stopped".to_string())
+}
+
+async fn stack_status(State(s): State<AppState>) -> impl IntoResponse {
+    use std::sync::atomic::Ordering;
+    Json(serde_json::json!({
+        "running": s.stack_active.load(Ordering::SeqCst),
+        "count": s.stack_count.load(Ordering::SeqCst),
+    }))
+}
+
+async fn stack_preview(State(s): State<AppState>) -> Response {
+    match s.stack_preview.lock().await.clone() {
+        Some(jpeg) => ([(header::CONTENT_TYPE, "image/jpeg")], jpeg).into_response(),
+        None => (StatusCode::NOT_FOUND, "no stack yet").into_response(),
     }
 }
 
@@ -2440,6 +2590,10 @@ async fn main() {
         af_target: Arc::new(std::sync::Mutex::new((0.5, 0.5, 0.25, 0.25))),
         me_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         connecting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        stack_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        stack_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        stack_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        stack_preview: Arc::new(Mutex::new(None)),
         #[cfg(feature = "detector")]
         detector: load_detector(),
     };
@@ -2475,6 +2629,10 @@ async fn main() {
         .route("/api/interval", post(interval_start))
         .route("/api/interval/stop", post(interval_stop))
         .route("/api/bracket", post(bracket_start)) // 노출 브라케팅(AEB)
+        .route("/api/stack/start", post(stack_start)) // 라이브스택
+        .route("/api/stack/stop", post(stack_stop))
+        .route("/api/stack/status", get(stack_status))
+        .route("/api/stack/preview", get(stack_preview))
         .route("/api/_debug/level", get(level_info))
         .route("/api/_debug/afframe", get(af_frame_info))
         .route("/api/shutter/down", post(shutter_down))

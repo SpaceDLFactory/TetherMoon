@@ -21,6 +21,7 @@ tracing-subscriber = "0.3"
 anyhow     = "1"
 jpeg-decoder = "0.3"   # SW-AF: 라이브뷰 JPEG → 그레이스케일 선명도 측정
 jpeg-encoder = "0.6"   # 스태킹/다중노출: 합성 결과 RGB → JPEG 인코드
+stacker    = { path = "../stacker" }  # 라이브스택: 별 정렬 + 프레임 누적 엔진
 detector   = { path = "../detector", optional = true }  # RT-DETR CoreML(추적AF, macOS 옵셔널)
 
 [features]

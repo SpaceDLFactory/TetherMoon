@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<!-- TetherMoon 라이브스택 탭: 라이브뷰 프레임을 별 정렬 후 누적해 SNR을 쌓는다.
+     average = 성운/딥스카이 노이즈 감소 미리보기, lighten = 밝은 것 누적(별궤적).
+     최종 화질용 RAW 스택은 아니고, "지금 대상이 쌓이나/프레이밍 맞나" 라이브 피드백용. -->
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TetherMoon · Live Stack</title>
+<style>
+  :root {
+    --bg:#1f1f1f; --bg-2:#2a2a2a; --bg-3:#303030; --fg:#e8e8e8; --fg-dim:#9b9b9b;
+    --fg-mute:#6a6a6a; --accent:#4a9eff; --danger:#ef4444; --good:#34d399; --border:#3a3a3a;
+  }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body { margin:0; height:100%; }
+  body {
+    background:var(--bg); color:var(--fg); font:14px/1.4 -apple-system, system-ui, sans-serif;
+    display:flex; flex-direction:column; height:100dvh; user-select:none;
+  }
+  body.night { filter:brightness(0.62) sepia(1) saturate(4) hue-rotate(-48deg); }
+  .topbar {
+    display:flex; align-items:center; gap:8px; padding:8px 12px; background:var(--bg-2);
+    border-bottom:1px solid var(--border); font-size:13px;
+  }
+  .topbar .title { font-weight:700; }
+  .topbar .sp { flex:1; }
+  .topbar .count { color:var(--good); font-variant-numeric:tabular-nums; }
+  a.nav, button.nav {
+    color:var(--fg-dim); text-decoration:none; background:var(--bg-3); border:1px solid var(--border);
+    border-radius:8px; padding:6px 10px; font-size:13px; cursor:pointer;
+  }
+  button.nav.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .view {
+    flex:1; min-height:0; background:#000; display:flex; align-items:center; justify-content:center;
+    position:relative; overflow:hidden;
+  }
+  #stackImg { max-width:100%; max-height:100%; display:none; }
+  .placeholder { color:var(--fg-mute); font-size:13px; text-align:center; padding:20px; }
+  .controls {
+    display:flex; align-items:center; gap:10px; padding:10px 12px; background:var(--bg-2);
+    border-top:1px solid var(--border); flex-wrap:wrap;
+  }
+  .controls select {
+    background:var(--bg-3); color:var(--fg); border:1px solid var(--border); border-radius:8px;
+    padding:8px 10px; font-size:14px;
+  }
+  .controls button {
+    border:1px solid var(--border); border-radius:10px; padding:10px 16px; font-size:14px; font-weight:600;
+    background:var(--bg-3); color:var(--fg); cursor:pointer;
+  }
+  #startBtn { background:var(--accent); border-color:var(--accent); color:#fff; }
+  #startBtn.running { background:var(--danger); border-color:var(--danger); }
+  .hint { color:var(--fg-mute); font-size:11px; padding:0 12px 10px; }
+  .toast {
+    position:fixed; left:50%; bottom:70px; transform:translateX(-50%); background:var(--bg-3);
+    border:1px solid var(--border); border-radius:10px; padding:8px 14px; font-size:13px;
+    opacity:0; transition:opacity .2s; pointer-events:none;
+  }
+  .toast.show { opacity:1; }
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="title">TetherMoon · Live Stack 🌙</span>
+    <span class="count" id="count"></span>
+    <span class="sp"></span>
+    <button class="nav" id="nightBtn" type="button" title="야간 모드">🌙</button>
+    <a class="nav" href="/web/index.html">← Console</a>
+  </div>
+
+  <div class="view">
+    <img id="stackImg" alt="">
+    <div class="placeholder" id="placeholder">
+      Start a stack. Frames from the live view are star-aligned and accumulated here.<br>
+      Average = build SNR on faint targets · Lighten = accumulate bright (trails).
+    </div>
+  </div>
+
+  <div class="controls">
+    <select id="mode">
+      <option value="average">Average (SNR)</option>
+      <option value="lighten">Lighten (trails)</option>
+    </select>
+    <button id="startBtn" type="button">Start</button>
+    <button class="nav" id="saveBtn" type="button" title="Open the current stack in a new tab to save">Save…</button>
+  </div>
+  <div class="hint">
+    Live-view (JPEG) stack for framing / SNR preview — not a final-quality RAW stack.
+    Best with a tracker or short runs; unalignable frames are dropped automatically.
+  </div>
+  <div class="toast" id="toast"></div>
+
+<script>
+  const $ = s => document.querySelector(s);
+  const img = $('#stackImg'), placeholder = $('#placeholder');
+  const startBtn = $('#startBtn'), modeSel = $('#mode'), countEl = $('#count'), saveBtn = $('#saveBtn');
+  const toastEl = $('#toast'); let toastT;
+  const toast = m => { toastEl.textContent = m; toastEl.classList.add('show');
+    clearTimeout(toastT); toastT = setTimeout(() => toastEl.classList.remove('show'), 1500); };
+
+  let running = false, poll = null;
+
+  const refresh = () => {
+    const probe = new Image();
+    probe.onload = () => { img.src = probe.src; img.style.display = 'block'; placeholder.style.display = 'none'; };
+    probe.onerror = () => {};
+    probe.src = '/api/stack/preview?t=' + Date.now();
+  };
+  const tick = async () => {
+    try {
+      const st = await (await fetch('/api/stack/status', { cache:'no-store' })).json();
+      countEl.textContent = st.count ? st.count + ' frames' : '';
+      if (st.running) refresh();
+      if (running && !st.running) setUI(false);   // 서버가 멈춤(에러 등)
+    } catch (e) {}
+  };
+  const setUI = (on) => {
+    running = on;
+    startBtn.textContent = on ? 'Stop' : 'Start';
+    startBtn.classList.toggle('running', on);
+    modeSel.disabled = on;
+    if (on && !poll) poll = setInterval(tick, 600);
+    if (!on && poll) { clearInterval(poll); poll = null; tick(); }
+  };
+
+  startBtn.addEventListener('click', async () => {
+    if (running) {
+      await fetch('/api/stack/stop', { method:'POST' }).catch(()=>{});
+      setUI(false);
+      return;
+    }
+    try {
+      const r = await fetch('/api/stack/start', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ mode: modeSel.value }) });
+      if (!r.ok) { toast('Stack: ' + (await r.text())); return; }
+      setUI(true);
+    } catch (e) { toast('Stack 시작 실패'); }
+  });
+
+  saveBtn.addEventListener('click', () => {
+    window.open('/api/stack/preview?t=' + Date.now(), '_blank'); // 새 탭 → 길게 눌러 저장
+  });
+
+  // 붉은 야간 모드 (Console과 localStorage 'night' 공유)
+  const nightBtn = $('#nightBtn');
+  const applyNight = on => { document.body.classList.toggle('night', on); nightBtn.classList.toggle('on', on); };
+  applyNight(localStorage.getItem('night') === '1');
+  nightBtn.addEventListener('click', () => {
+    const on = !document.body.classList.contains('night');
+    applyNight(on); localStorage.setItem('night', on ? '1' : '0');
+  });
+
+  tick();
+</script>
+</body>
+</html>
