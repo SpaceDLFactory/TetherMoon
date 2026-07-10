@@ -910,6 +910,38 @@ async fn sw_autofocus(State(s): State<AppState>, Json(mut b): Json<SwAfReq>) -> 
     .into_response()
 }
 
+/// 현재 라이브뷰에서 가장 밝은 지점(별·달)의 정규화 좌표를 반환. 클라이언트가 이 좌표로
+/// SW-AF를 걸어 "가장 밝은 별에 합초"한다(암순간 수동 합초가 어려운 밤하늘용). 장면이
+/// 너무 어두우면(별 없음) 404, 라이브뷰 미가동이면 428.
+async fn brightest(State(s): State<AppState>) -> Response {
+    if s.camera.lock().await.is_none() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "not connected").into_response();
+    }
+    let mut rx = s.lv_tx.subscribe();
+    while rx.try_recv().is_ok() {} // 쌓인 오래된 프레임 폐기
+    let mut frame = None;
+    for _ in 0..3 {
+        match tokio::time::timeout(Duration::from_millis(700), rx.recv()).await {
+            Ok(Ok(f)) => {
+                frame = Some(f);
+                break;
+            }
+            Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+            _ => break,
+        }
+    }
+    let frame = match frame {
+        Some(f) => f,
+        None => {
+            return (StatusCode::PRECONDITION_REQUIRED, "live view not running").into_response()
+        }
+    };
+    match tokio::task::spawn_blocking(move || autofocus::brightest_point(&frame[..])).await {
+        Ok(Some((x, y))) => Json(serde_json::json!({ "x": x, "y": y })).into_response(),
+        _ => (StatusCode::NOT_FOUND, "no bright point (scene too dark)").into_response(),
+    }
+}
+
 /// 연속 AF: 초기 합초 후 모니터 루프 — ROI 선명도가 baseline 대비 threshold 미만으로
 /// 떨어지면(피사체 이동/카메라 흔들림) 재합초. /cancel(af_cancel=true)로 정지.
 /// 즉시 "started" 반환하고 백그라운드 진행, 상태는 /events SSE(af_continuous).
@@ -2206,6 +2238,8 @@ async fn main() {
         .route("/api/focus_nearfar", post(focus_near_far))
         .route("/api/focus_nearfar/info", get(focus_nearfar_info))
         .route("/api/sw_autofocus", post(sw_autofocus))
+        .route("/api/brightest", post(brightest)) // 가장 밝은 별 좌표 → Star AF
+
         .route("/api/sw_autofocus/continuous", post(sw_autofocus_continuous))
         .route("/api/sw_autofocus/cancel", post(sw_autofocus_cancel))
         .route("/api/sw_autofocus/retarget", post(sw_autofocus_retarget))

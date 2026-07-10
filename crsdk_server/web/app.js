@@ -19,7 +19,7 @@
       'hint.bulb':'Sets the shutter to BULB for an N-second exposure (Manual mode required). For exposures longer than 30s.',
       'hint.interval':'Software interval. For RAW use interval ≥10s (download ~8s). MF recommended.',
       'hint.afpoint':'Tap the live view to focus; nudge with the D-pad / arrow keys.',
-      'ph.savepath':'PC save folder path','ph.prefix':'Filename prefix (e.g. SHOOT)','btn.browse':'Browse…','btn.swaf':'SW-AF (pick point)','swaf.tune':'SW-AF tuning','swaf.continuous':'Continuous (track focus)',
+      'ph.savepath':'PC save folder path','ph.prefix':'Filename prefix (e.g. SHOOT)','btn.browse':'Browse…','btn.swaf':'SW-AF (pick point)','btn.staraf':'★ Star AF (brightest)','title.staraf':'Autofocus on the brightest star/point in the frame','swaf.tune':'SW-AF tuning','swaf.continuous':'Continuous (track focus)',
       'status.reconnect':'· click CAPTURE → retry connect',
       'dyn.exposing':'Exposing','dyn.bulbcaptured':'● BULB CAPTURED','dyn.interval':'Interval','dyn.stop':'Stop',
       'toast.saved':'Saved','toast.disconnected':'Camera disconnected','toast.sdkerr':'SDK error',
@@ -42,7 +42,7 @@
       'hint.bulb':'셔터를 BULB로 바꿔 N초 노출 (Manual 모드 필요). 30초 초과 장노출용',
       'hint.interval':'소프트웨어 인터벌. RAW는 간격 ≥10초 권장(다운로드 ~8s). 초점은 MF 권장',
       'hint.afpoint':'라이브뷰를 탭해서 포커스; D-pad·방향키로 미세 이동.',
-      'ph.savepath':'PC 저장 폴더 경로','ph.prefix':'파일명 접두사 (예: SHOOT)','btn.browse':'찾아보기','btn.swaf':'SW-AF (지점 선택)','swaf.tune':'SW-AF 튜닝','swaf.continuous':'연속 (초점 추적)',
+      'ph.savepath':'PC 저장 폴더 경로','ph.prefix':'파일명 접두사 (예: SHOOT)','btn.browse':'찾아보기','btn.swaf':'SW-AF (지점 선택)','btn.staraf':'★ Star AF (제일 밝은 별)','title.staraf':'화면에서 가장 밝은 별/지점에 자동 합초','swaf.tune':'SW-AF 튜닝','swaf.continuous':'연속 (초점 추적)',
       'status.reconnect':'· click CAPTURE → /api/connect 재시도',
       'dyn.exposing':'노출중','dyn.bulbcaptured':'● 벌브 촬영','dyn.interval':'인터벌','dyn.stop':'정지',
       'toast.saved':'저장됨','toast.disconnected':'카메라 연결 끊김','toast.sdkerr':'SDK 오류',
@@ -65,7 +65,7 @@
       'hint.bulb':'シャッターを BULB にして N 秒露光（Manual モード必須）。30 秒超の長秒露光用。',
       'hint.interval':'ソフトウェアインターバル。RAW は間隔 ≥10 秒推奨（ダウンロード約 8 秒）。ピントは MF 推奨。',
       'hint.afpoint':'ライブビューをタップでフォーカス; D-pad・矢印キーで微調整。',
-      'ph.savepath':'PC 保存フォルダのパス','ph.prefix':'ファイル名プレフィックス（例: SHOOT）','btn.browse':'参照…','btn.swaf':'SW-AF (位置選択)','swaf.tune':'SW-AF 調整','swaf.continuous':'連続 (フォーカス追従)',
+      'ph.savepath':'PC 保存フォルダのパス','ph.prefix':'ファイル名プレフィックス（例: SHOOT）','btn.browse':'参照…','btn.swaf':'SW-AF (位置選択)','btn.staraf':'★ Star AF (最も明るい星)','title.staraf':'画面内で最も明るい星/点に自動でピント','swaf.tune':'SW-AF 調整','swaf.continuous':'連続 (フォーカス追従)',
       'status.reconnect':'· CAPTURE をクリック → 再接続',
       'dyn.exposing':'露出中','dyn.bulbcaptured':'● バルブ撮影','dyn.interval':'インターバル','dyn.stop':'停止',
       'toast.saved':'保存','toast.disconnected':'カメラ切断','toast.sdkerr':'SDK エラー',
@@ -992,6 +992,21 @@
       setTimeout(() => { if (!swafRunning && !swafArming) setSwaf('SW-AF (pick point)'); }, 2500);
     }
   };
+
+  // ── Star AF: 가장 밝은 별/지점에 자동 합초 ───────────────────────────
+  // 서버가 현재 프레임에서 제일 밝은 점(센서 좌표)을 찾아주면 그 지점으로 SW-AF를 건다.
+  // 밤하늘 수동 합초가 어려운 문제를 "제일 밝은 걸로 맞춰라"로 해결. brightest는 미회전
+  // 센서 좌표라 swafPick에 r=0으로 넘겨 unrotate를 우회한다(회전 시 ROI 박스만 약간 오프).
+  const starBtn = document.getElementById('starBtn');
+  starBtn.addEventListener('click', async () => {
+    if (swafRunning) return;
+    try {
+      const res = await fetch('/api/brightest', { method: 'POST' });
+      if (!res.ok) { toast('Star AF: ' + (await res.text()), 'err'); return; }
+      const d = await res.json();
+      swafPick(d.x, d.y, 0);
+    } catch (e) { toast('Star AF 실패', 'err'); }
+  });
 
   // ── SW-AF 박스 드래그(영역 선택) ─────────────────────────────────────
   // 무장 상태에서 라이브뷰를 드래그하면 직사각형 ROI, 거의 안 움직이면 점-선택.
