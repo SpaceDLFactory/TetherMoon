@@ -83,12 +83,41 @@
   </details>
 
   <div class="add">
-    <span style="color:var(--fg-dim);font-size:12px;">Add target:</span>
+    <span style="color:var(--fg-dim);font-size:12px;">Add:</span>
+    <select id="catalog">
+      <option value="">Pick a target…</option>
+      <optgroup label="Deep sky">
+        <option value="M31 Andromeda|0.712|41.269">M31 Andromeda Galaxy</option>
+        <option value="M42 Orion Nebula|5.588|-5.391">M42 Orion Nebula</option>
+        <option value="M45 Pleiades|3.791|24.105">M45 Pleiades</option>
+        <option value="M44 Beehive|8.670|19.667">M44 Beehive</option>
+        <option value="M13 Hercules|16.695|36.460">M13 Hercules Cluster</option>
+        <option value="M57 Ring Nebula|18.893|33.029">M57 Ring Nebula</option>
+        <option value="M27 Dumbbell|19.994|22.721">M27 Dumbbell</option>
+        <option value="M8 Lagoon|18.061|-24.383">M8 Lagoon</option>
+        <option value="M51 Whirlpool|13.498|47.195">M51 Whirlpool</option>
+        <option value="M81 Bode's|9.926|69.066">M81 Bode's Galaxy</option>
+        <option value="M104 Sombrero|12.667|-11.623">M104 Sombrero</option>
+        <option value="Double Cluster|2.333|57.133">Double Cluster</option>
+      </optgroup>
+      <optgroup label="Bright stars">
+        <option value="Polaris|2.530|89.264">Polaris</option>
+        <option value="Vega|18.616|38.784">Vega</option>
+        <option value="Sirius|6.752|-16.716">Sirius</option>
+        <option value="Arcturus|14.261|19.182">Arcturus</option>
+        <option value="Capella|5.278|45.998">Capella</option>
+        <option value="Betelgeuse|5.919|7.407">Betelgeuse</option>
+        <option value="Rigel|5.242|-8.202">Rigel</option>
+        <option value="Deneb|20.690|45.280">Deneb</option>
+        <option value="Altair|19.846|8.868">Altair</option>
+        <option value="Antares|16.490|-26.432">Antares</option>
+      </optgroup>
+    </select>
+    <span style="color:var(--fg-mute);font-size:12px;">or coords:</span>
     <input class="xs" id="tName" placeholder="Name">
-    <label>RA(h)</label><input class="xs" id="tRA" type="number" step="0.01" placeholder="5.58">
-    <label>Dec(°)</label><input class="xs" id="tDec" type="number" step="0.01" placeholder="-5.4">
+    <input class="xs" id="tRA" type="number" step="0.01" placeholder="RA h">
+    <input class="xs" id="tDec" type="number" step="0.01" placeholder="Dec °">
     <button class="act" id="addBtn">Add</button>
-    <span style="color:var(--fg-mute);font-size:11px;">e.g. Orion Nebula 5.59 / -5.39 · Polaris 2.53 / 89.26</span>
   </div>
   <div class="hint">Altitude &gt; 0 = above the horizon. Higher = better (less air). Planets/Moon are approximate (~arcmin).
     Custom targets are fixed RA/Dec (stars, deep-sky). Saved locally.</div>
@@ -258,11 +287,16 @@
       localStorage.setItem('plan_lat',$('#lat').value); localStorage.setItem('plan_lon',$('#lon').value); render();
     });
   });
+  const addTarget=(name,ra,dec)=>{ custom=custom.filter(t=>t.name!==name); custom.push({name,ra,dec}); saveCustom(); render(); };
   $('#addBtn').addEventListener('click',()=>{
     const name=$('#tName').value.trim(), ra=parseFloat($('#tRA').value), dec=parseFloat($('#tDec').value);
     if(!name||!isFinite(ra)||!isFinite(dec)) return;
-    custom=custom.filter(t=>t.name!==name); custom.push({name,ra,dec}); saveCustom();
-    $('#tName').value=$('#tRA').value=$('#tDec').value=''; render();
+    addTarget(name,ra,dec); $('#tName').value=$('#tRA').value=$('#tDec').value='';
+  });
+  $('#catalog').addEventListener('change',e=>{
+    if(!e.target.value) return;
+    const [name,ra,dec]=e.target.value.split('|');
+    addTarget(name,parseFloat(ra),parseFloat(dec)); e.target.value='';
   });
 
   // 야간 모드 (Console과 localStorage 'night' 공유)
