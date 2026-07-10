@@ -783,7 +783,7 @@
 
   // ── ① 촬영 직후 미리보기 ──────────────────────────────────────────────
   // download_complete 시 서버가 마지막 PC 저장 파일을 /api/last_image로 반환.
-  // RAW(ARW)는 브라우저가 못 그리므로 JPEG/HEIF만 표시, 그 외는 토스트만.
+  // RAW(ARW)는 서버가 박힌 JPEG 프리뷰를 뽑아 주므로 미리보기가 뜬다. 뽑기 실패한 것만 onerror로 스킵.
   const showPreview = () => {
     const img = document.getElementById('previewImg');
     const box = document.getElementById('previewBox');
@@ -798,7 +798,7 @@
   // ── 필름스트립 (최근 촬영 썸네일) ─────────────────────────────────────
   // 서버는 최신 1장(/api/last_image)만 기억하므로, download_complete 시 즉시 로드해
   // 캔버스로 다운스케일한 dataURL을 누적(이후 최신값으로 덮여도 로드된 픽셀은 보존).
-  // RAW(ARW 등 브라우저 미지원)는 onerror로 스킵. 썸네일 클릭=미리보기 확대.
+  // RAW는 서버가 뽑은 박힌 JPEG로 로드됨(뽑기 실패 시에만 onerror로 스킵). 썸네일 클릭=미리보기 확대.
   const filmstrip = document.getElementById('filmstrip');
   const recentCard = document.getElementById('recentCard');
   const MAX_THUMBS = 12;

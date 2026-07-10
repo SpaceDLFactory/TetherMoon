@@ -1637,6 +1637,46 @@ async fn cancel_shooting(State(s): State<AppState>) -> impl IntoResponse {
 }
 
 // ── 촬영 미리보기: 마지막 PC 저장 이미지 반환 ────────────────────────────
+/// RAW(Sony ARW = TIFF 컨테이너)에 박힌 JPEG 프리뷰를 뽑아낸다. 파일에서 가장 큰 JPEG
+/// 세그먼트(SOI `FF D8 FF` … EOI `FF D9`)를 찾아 반환 — ARW는 풀사이즈 JPEG 프리뷰를
+/// 포함하므로 이걸 브라우저에 그대로 그릴 수 있다. 없으면 None.
+fn extract_embedded_jpeg(bytes: &[u8]) -> Option<Vec<u8>> {
+    // 모든 SOI(FF D8 FF)…EOI(FF D9) 후보를 수집한다.
+    let mut cands: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0usize;
+    while i + 2 < bytes.len() {
+        if bytes[i] == 0xFF && bytes[i + 1] == 0xD8 && bytes[i + 2] == 0xFF {
+            let mut j = i + 2;
+            let mut found = false;
+            while j + 1 < bytes.len() {
+                if bytes[j] == 0xFF && bytes[j + 1] == 0xD9 {
+                    cands.push((i, j + 2 - i));
+                    i = j + 2;
+                    found = true;
+                    break;
+                }
+                j += 1;
+            }
+            if !found {
+                break; // 닫히지 않은 SOI
+            }
+        } else {
+            i += 1;
+        }
+    }
+    // 큰 것부터, 실제 JPEG 헤더로 파싱되는 첫 후보를 반환 — ARW의 raw 데이터에 우연히
+    // 생기는 가짜 FF D8…FF D9 세그먼트를 걸러낸다(가짜는 헤더 파싱 실패).
+    cands.sort_by(|a, b| b.1.cmp(&a.1));
+    for (s, l) in cands {
+        let seg = &bytes[s..s + l];
+        let mut dec = jpeg_decoder::Decoder::new(std::io::Cursor::new(seg));
+        if dec.read_info().is_ok() {
+            return Some(seg.to_vec());
+        }
+    }
+    None
+}
+
 async fn last_image(State(s): State<AppState>) -> Response {
     let path = match s.last_image.lock().await.clone() {
         Some(p) => p,
@@ -1645,18 +1685,58 @@ async fn last_image(State(s): State<AppState>) -> Response {
     match tokio::fs::read(&path).await {
         Ok(bytes) => {
             let lp = path.to_lowercase();
-            // 실제 확장자에 맞는 content-type(RAW를 image/jpeg로 라벨하던 버그 수정 — 브라우저가
-            // ARW를 JPEG로 못 그려 깨짐). RAW/미지원은 octet-stream → UI onerror로 스킵.
-            let ct = if lp.ends_with(".heif") || lp.ends_with(".heic") {
-                "image/heif"
+            if lp.ends_with(".heif") || lp.ends_with(".heic") {
+                ([(header::CONTENT_TYPE, "image/heif")], bytes).into_response()
             } else if lp.ends_with(".jpg") || lp.ends_with(".jpeg") {
-                "image/jpeg"
+                ([(header::CONTENT_TYPE, "image/jpeg")], bytes).into_response()
+            } else if let Some(jpeg) = extract_embedded_jpeg(&bytes) {
+                // RAW(.arw 등): 박힌 JPEG 프리뷰를 뽑아 미리보기로 그린다.
+                ([(header::CONTENT_TYPE, "image/jpeg")], jpeg).into_response()
             } else {
-                "application/octet-stream" // .arw 등 RAW
-            };
-            ([(header::CONTENT_TYPE, ct)], bytes).into_response()
+                // 프리뷰 못 뽑은 RAW/미지원 → octet-stream, UI는 onerror로 스킵.
+                ([(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response()
+            }
         }
         Err(_) => (StatusCode::NOT_FOUND, "read fail").into_response(),
+    }
+}
+
+#[cfg(test)]
+mod jpeg_extract_tests {
+    use super::extract_embedded_jpeg;
+
+    fn real_jpeg(w: u16, h: u16) -> Vec<u8> {
+        let rgb = vec![128u8; (w as usize) * (h as usize) * 3];
+        let mut out = Vec::new();
+        jpeg_encoder::Encoder::new(&mut out, 90)
+            .encode(&rgb, w, h, jpeg_encoder::ColorType::Rgb)
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn extracts_the_real_preview_over_bogus() {
+        // ARW 흉내: TIFF 헤더 + 진짜 JPEG 프리뷰 + raw 데이터에 우연히 생긴 "더 큰" 가짜 세그먼트.
+        let jpeg = real_jpeg(32, 24);
+        let mut buf = vec![0x49, 0x49, 0x2A, 0x00]; // "II*\0"
+        buf.extend_from_slice(&jpeg);
+        // 진짜보다 더 큰 가짜 FF D8 FF … FF D9 (JPEG 헤더로 파싱 안 됨)
+        let mut bogus = vec![0xFF, 0xD8, 0xFF];
+        bogus.extend(std::iter::repeat(0x5A).take(jpeg.len() + 100));
+        bogus.extend_from_slice(&[0xFF, 0xD9]);
+        buf.extend_from_slice(&bogus);
+        let out = extract_embedded_jpeg(&buf).expect("should find the real jpeg");
+        assert_eq!(out, jpeg, "가짜(더 큰) 세그먼트가 아니라 진짜 JPEG을 뽑아야 함");
+    }
+
+    #[test]
+    fn none_when_no_jpeg() {
+        assert!(extract_embedded_jpeg(&[0x49, 0x49, 0x2A, 0x00, 1, 2, 3, 4, 5]).is_none());
+    }
+
+    #[test]
+    fn none_on_unclosed_soi() {
+        assert!(extract_embedded_jpeg(&[0x00, 0xFF, 0xD8, 0xFF, 0x11, 0x22]).is_none());
     }
 }
 
