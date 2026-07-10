@@ -72,6 +72,7 @@
 
   <div class="view">
     <img id="stackImg" alt="">
+    <div id="roibox" style="display:none;position:absolute;border:2px solid var(--accent);box-shadow:0 0 0 1px rgba(0,0,0,.6);pointer-events:none;"></div>
     <div class="placeholder" id="placeholder">
       Start a stack. Frames from the live view are star-aligned and accumulated here.<br>
       Average = build SNR on faint targets · Lighten = accumulate bright (trails).
@@ -82,6 +83,11 @@
     <select id="mode">
       <option value="average">Average (SNR)</option>
       <option value="lighten">Lighten (trails)</option>
+    </select>
+    <select id="align" title="Alignment: Stars for deep-sky, Centroid for moon/planets, ROI to lock onto a feature you draw">
+      <option value="stars">Align: Stars</option>
+      <option value="centroid">Align: Centroid</option>
+      <option value="roi">Align: ROI (draw)</option>
     </select>
     <button id="startBtn" type="button">Start</button>
     <button class="nav" id="saveBtn" type="button" title="Open the current stack in a new tab to save">Save…</button>
@@ -112,6 +118,40 @@
   const $ = s => document.querySelector(s);
   const img = $('#stackImg'), placeholder = $('#placeholder');
   const startBtn = $('#startBtn'), modeSel = $('#mode'), countEl = $('#count'), saveBtn = $('#saveBtn');
+  const alignSel = $('#align'), viewEl = document.querySelector('.view'), roibox = $('#roibox');
+
+  // 정렬 파라미터. ROI면 프리뷰에 그린 박스의 정규화 [cx,cy,half].
+  let roiSel = null;
+  const alignBody = () => {
+    const a = alignSel.value, o = { align: a };
+    if (a === 'roi' && roiSel) o.roi = [roiSel.cx, roiSel.cy, roiSel.half];
+    return o;
+  };
+  // ROI 드래그(프리뷰 이미지 위). align=roi + 프리뷰 있을 때만.
+  let drag = null;
+  viewEl.addEventListener('pointerdown', e => {
+    if (alignSel.value !== 'roi' || img.style.display === 'none') return;
+    drag = { r: img.getBoundingClientRect(), x0: e.clientX, y0: e.clientY };
+    roibox.style.display = 'block';
+  });
+  window.addEventListener('pointermove', e => {
+    if (!drag) return;
+    const vr = viewEl.getBoundingClientRect();
+    roibox.style.left = (Math.min(drag.x0, e.clientX) - vr.left) + 'px';
+    roibox.style.top = (Math.min(drag.y0, e.clientY) - vr.top) + 'px';
+    roibox.style.width = Math.abs(e.clientX - drag.x0) + 'px';
+    roibox.style.height = Math.abs(e.clientY - drag.y0) + 'px';
+  });
+  window.addEventListener('pointerup', e => {
+    if (!drag) return;
+    const r = drag.r, cl = v => Math.min(1, Math.max(0, v));
+    const cx = (Math.min(drag.x0, e.clientX) + Math.abs(e.clientX - drag.x0) / 2 - r.left) / r.width;
+    const cy = (Math.min(drag.y0, e.clientY) + Math.abs(e.clientY - drag.y0) / 2 - r.top) / r.height;
+    const half = (Math.abs(e.clientX - drag.x0) / 2) / r.width;
+    if (half > 0.01) roiSel = { cx: cl(cx), cy: cl(cy), half };
+    else roibox.style.display = 'none';
+    drag = null;
+  });
   const toastEl = $('#toast'); let toastT;
   const toast = m => { toastEl.textContent = m; toastEl.classList.add('show');
     clearTimeout(toastT); toastT = setTimeout(() => toastEl.classList.remove('show'), 1500); };
@@ -150,7 +190,7 @@
     try {
       const r = await fetch('/api/stack/start', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ mode: modeSel.value }) });
+        body: JSON.stringify({ mode: modeSel.value, ...alignBody() }) });
       if (!r.ok) { toast('Stack: ' + (await r.text())); return; }
       setUI(true);
     } catch (e) { toast('Stack 시작 실패'); }
@@ -177,7 +217,7 @@
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({ mode: modeSel.value, limit: parseInt(limitEl.value,10) || 30,
           dir: dirEl.value.trim() || undefined, best: bestEl.value ? parseFloat(bestEl.value) : undefined,
-          linear: linEl.checked || undefined }) });
+          linear: linEl.checked || undefined, ...alignBody() }) });
       if (!r.ok) { toast('Post-stack: ' + (await r.text())); return; }
       toast('Post-stacking saved frames…'); setUI(true);
     } catch (e) { toast('Post-stack 실패'); }

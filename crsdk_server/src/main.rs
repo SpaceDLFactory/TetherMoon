@@ -1000,9 +1000,23 @@ async fn focus_score(State(s): State<AppState>, Json(b): Json<FocusScoreReq>) ->
 }
 
 // ── 라이브 스택 (별 정렬 + 프레임 누적) ────────────────────────────────────
+/// 정렬 방식 파싱. "stars"(기본) | "centroid" | "roi"(roi=[cx,cy,half] 정규화).
+fn parse_align(a: Option<&str>, roi: Option<[f32; 3]>) -> stacker::Align {
+    match a {
+        Some("centroid") => stacker::Align::Centroid,
+        Some("roi") => match roi {
+            Some(r) => stacker::Align::Roi { cx: r[0], cy: r[1], half: r[2] },
+            None => stacker::Align::Stars,
+        },
+        _ => stacker::Align::Stars,
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct StackReq {
-    mode: Option<String>, // "average"(기본) | "lighten"
+    mode: Option<String>,      // "average"(기본) | "lighten"
+    align: Option<String>,     // "stars" | "centroid" | "roi"
+    roi: Option<[f32; 3]>,     // roi 모드용 [cx, cy, half] (0..1)
 }
 
 /// 라이브스택 시작: 라이브뷰 프레임을 구독해 별 정렬 후 누적하고, 최신 스택본을 주기적으로
@@ -1044,6 +1058,7 @@ async fn stack_start(State(s): State<AppState>, Json(b): Json<StackReq>) -> impl
         Some("lighten") => stacker::Mode::Lighten,
         _ => stacker::Mode::Average,
     };
+    let al = parse_align(b.align.as_deref(), b.roi);
     let guard = RunGuard(s.stack_active.clone());
     let cancel = s.stack_cancel.clone();
     let count = s.stack_count.clone();
@@ -1097,7 +1112,7 @@ async fn stack_start(State(s): State<AppState>, Json(b): Json<StackReq>) -> impl
             match dims {
                 None => {
                     dims = Some((w, h));
-                    stk = Some(stacker::Stacker::new(w, h, mode));
+                    stk = Some(stacker::Stacker::new(w, h, mode).with_align(al));
                 }
                 Some((sw, sh)) if sw == w && sh == h => {}
                 Some(_) => continue, // 해상도 바뀐 프레임은 스킵
@@ -1214,6 +1229,8 @@ struct FolderStackReq {
     limit: Option<usize>,
     dir: Option<String>,  // 스택할 폴더(생략 시 저장 폴더)
     best: Option<f32>,    // lucky imaging: 선명한 상위 비율(0~1)만 스택. 생략=전부
+    align: Option<String>, // "stars"(기본) | "centroid" | "roi"
+    roi: Option<[f32; 3]>, // roi 모드용 [cx, cy, half] (0..1)
     #[cfg_attr(not(feature = "raw"), allow(dead_code))] // raw feature에서만 사용
     linear: Option<bool>, // true면 RAW를 선형광 f32로 누적(--features raw, ARW만). 고SNR.
 }
@@ -1244,6 +1261,7 @@ async fn stack_folder(State(s): State<AppState>, Json(b): Json<FolderStackReq>) 
     };
     let limit = b.limit.unwrap_or(30).clamp(2, 200);
     let best = b.best;
+    let al = parse_align(b.align.as_deref(), b.roi);
     #[cfg(feature = "raw")]
     let linear = b.linear.unwrap_or(false);
     s.stack_count.store(0, Ordering::SeqCst);
@@ -1317,7 +1335,7 @@ async fn stack_folder(State(s): State<AppState>, Json(b): Json<FolderStackReq>) 
                         match dims {
                             None => {
                                 dims = Some((w, h));
-                                stk = Some(stacker::Stacker::new_linear(w, h, mode));
+                                stk = Some(stacker::Stacker::new_linear(w, h, mode).with_align(al));
                             }
                             Some((sw, sh)) if sw == w && sh == h => {}
                             Some(_) => continue,
@@ -1340,7 +1358,7 @@ async fn stack_folder(State(s): State<AppState>, Json(b): Json<FolderStackReq>) 
             match dims {
                 None => {
                     dims = Some((w, h));
-                    stk = Some(stacker::Stacker::new(w, h, mode));
+                    stk = Some(stacker::Stacker::new(w, h, mode).with_align(al));
                 }
                 Some((sw, sh)) if sw == w && sh == h => {}
                 Some(_) => continue,
