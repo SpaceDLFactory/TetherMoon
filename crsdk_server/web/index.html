@@ -190,6 +190,18 @@
       <div class="btn-row">
         <button class="btn" id="starBtn" type="button" data-i18n="btn.staraf" data-i18n-title="title.staraf">★ Star AF (brightest)</button>
       </div>
+      <div class="btn-row">
+        <button class="btn" id="fmBtn" type="button" data-i18n="btn.focusmeter" data-i18n-title="title.focusmeter">Focus meter</button>
+      </div>
+      <div id="fmReadout" style="display:none;margin-top:4px;">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;">
+          <span id="fmScore" style="font-size:22px;font-weight:700;font-variant-numeric:tabular-nums;">—</span>
+          <span id="fmPeak" style="color:var(--fg-dim);font-size:11px;">peak —</span>
+        </div>
+        <div style="height:6px;background:var(--bg-3);border-radius:3px;overflow:hidden;margin-top:3px;">
+          <div id="fmBar" style="height:100%;width:0;background:var(--accent);transition:width .1s;"></div>
+        </div>
+      </div>
       <details class="swaf-cfg">
         <summary data-i18n="swaf.tune">SW-AF tuning</summary>
         <div class="nf-slider" style="grid-template-columns:auto 1fr auto;">

@@ -19,7 +19,7 @@
       'hint.bulb':'Sets the shutter to BULB for an N-second exposure (Manual mode required). For exposures longer than 30s.',
       'hint.interval':'Software interval. For RAW use interval ≥10s (download ~8s). MF recommended.',
       'hint.afpoint':'Tap the live view to focus; nudge with the D-pad / arrow keys.',
-      'ph.savepath':'PC save folder path','ph.prefix':'Filename prefix (e.g. SHOOT)','btn.browse':'Browse…','btn.swaf':'SW-AF (pick point)','btn.staraf':'★ Star AF (brightest)','title.staraf':'Autofocus on the brightest star/point in the frame','swaf.tune':'SW-AF tuning','swaf.continuous':'Continuous (track focus)',
+      'ph.savepath':'PC save folder path','ph.prefix':'Filename prefix (e.g. SHOOT)','btn.browse':'Browse…','btn.swaf':'SW-AF (pick point)','btn.staraf':'★ Star AF (brightest)','title.staraf':'Autofocus on the brightest star/point in the frame','btn.focusmeter':'Focus meter','title.focusmeter':'Live sharpness of the brightest star — turn MF and peak the number for perfect focus','swaf.tune':'SW-AF tuning','swaf.continuous':'Continuous (track focus)',
       'status.reconnect':'· click CAPTURE → retry connect',
       'dyn.exposing':'Exposing','dyn.bulbcaptured':'● BULB CAPTURED','dyn.interval':'Interval','dyn.stop':'Stop',
       'toast.saved':'Saved','toast.disconnected':'Camera disconnected','toast.sdkerr':'SDK error',
@@ -42,7 +42,7 @@
       'hint.bulb':'셔터를 BULB로 바꿔 N초 노출 (Manual 모드 필요). 30초 초과 장노출용',
       'hint.interval':'소프트웨어 인터벌. RAW는 간격 ≥10초 권장(다운로드 ~8s). 초점은 MF 권장',
       'hint.afpoint':'라이브뷰를 탭해서 포커스; D-pad·방향키로 미세 이동.',
-      'ph.savepath':'PC 저장 폴더 경로','ph.prefix':'파일명 접두사 (예: SHOOT)','btn.browse':'찾아보기','btn.swaf':'SW-AF (지점 선택)','btn.staraf':'★ Star AF (제일 밝은 별)','title.staraf':'화면에서 가장 밝은 별/지점에 자동 합초','swaf.tune':'SW-AF 튜닝','swaf.continuous':'연속 (초점 추적)',
+      'ph.savepath':'PC 저장 폴더 경로','ph.prefix':'파일명 접두사 (예: SHOOT)','btn.browse':'찾아보기','btn.swaf':'SW-AF (지점 선택)','btn.staraf':'★ Star AF (제일 밝은 별)','title.staraf':'화면에서 가장 밝은 별/지점에 자동 합초','btn.focusmeter':'초점 미터','title.focusmeter':'가장 밝은 별의 실시간 선명도 — MF 돌려 숫자 피크에서 정확 초점','swaf.tune':'SW-AF 튜닝','swaf.continuous':'연속 (초점 추적)',
       'status.reconnect':'· click CAPTURE → /api/connect 재시도',
       'dyn.exposing':'노출중','dyn.bulbcaptured':'● 벌브 촬영','dyn.interval':'인터벌','dyn.stop':'정지',
       'toast.saved':'저장됨','toast.disconnected':'카메라 연결 끊김','toast.sdkerr':'SDK 오류',
@@ -65,7 +65,7 @@
       'hint.bulb':'シャッターを BULB にして N 秒露光（Manual モード必須）。30 秒超の長秒露光用。',
       'hint.interval':'ソフトウェアインターバル。RAW は間隔 ≥10 秒推奨（ダウンロード約 8 秒）。ピントは MF 推奨。',
       'hint.afpoint':'ライブビューをタップでフォーカス; D-pad・矢印キーで微調整。',
-      'ph.savepath':'PC 保存フォルダのパス','ph.prefix':'ファイル名プレフィックス（例: SHOOT）','btn.browse':'参照…','btn.swaf':'SW-AF (位置選択)','btn.staraf':'★ Star AF (最も明るい星)','title.staraf':'画面内で最も明るい星/点に自動でピント','swaf.tune':'SW-AF 調整','swaf.continuous':'連続 (フォーカス追従)',
+      'ph.savepath':'PC 保存フォルダのパス','ph.prefix':'ファイル名プレフィックス（例: SHOOT）','btn.browse':'参照…','btn.swaf':'SW-AF (位置選択)','btn.staraf':'★ Star AF (最も明るい星)','title.staraf':'画面内で最も明るい星/点に自動でピント','btn.focusmeter':'ピントメーター','title.focusmeter':'最も明るい星の実時間シャープネス — MF を回して数値のピークで最良ピント','swaf.tune':'SW-AF 調整','swaf.continuous':'連続 (フォーカス追従)',
       'status.reconnect':'· CAPTURE をクリック → 再接続',
       'dyn.exposing':'露出中','dyn.bulbcaptured':'● バルブ撮影','dyn.interval':'インターバル','dyn.stop':'停止',
       'toast.saved':'保存','toast.disconnected':'カメラ切断','toast.sdkerr':'SDK エラー',
@@ -1029,6 +1029,46 @@
       const d = await res.json();
       swafPick(d.x, d.y, 0);
     } catch (e) { toast('Star AF 실패', 'err'); }
+  });
+
+  // ── 라이브 초점 미터 ─────────────────────────────────────────────────
+  // 가장 밝은 별 ROI의 선명도를 짧은 주기로 폴링해 표시. MF 돌려 숫자/막대 피크에서 정확 초점.
+  const fmBtn = document.getElementById('fmBtn');
+  const fmReadout = document.getElementById('fmReadout');
+  const fmScore = document.getElementById('fmScore');
+  const fmPeak = document.getElementById('fmPeak');
+  const fmBar = document.getElementById('fmBar');
+  let fmTimer = null, fmPeakVal = 0, fmLast = 0;
+  const fmStop = () => {
+    if (fmTimer) clearInterval(fmTimer);
+    fmTimer = null;
+    fmBtn.classList.remove('active');
+    fmReadout.style.display = 'none';
+    afMarker.style.display = 'none';
+  };
+  const fmTick = async () => {
+    try {
+      const r = await fetch('/api/focus_score', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      if (!r.ok) { fmScore.textContent = '—'; return; }
+      const d = await r.json();
+      const sc = d.score || 0;
+      fmPeakVal = Math.max(fmPeakVal, sc);
+      const arrow = sc > fmLast * 1.02 ? '▲' : (sc < fmLast * 0.98 ? '▼' : '=');
+      fmLast = sc;
+      fmScore.textContent = Math.round(sc) + ' ' + arrow;
+      fmPeak.textContent = 'peak ' + Math.round(fmPeakVal);
+      fmBar.style.width = (fmPeakVal > 0 ? Math.round(100 * sc / fmPeakVal) : 0) + '%';
+      afMarker.style.left = (d.x * 100) + '%'; afMarker.style.top = (d.y * 100) + '%'; afMarker.style.display = '';
+    } catch (e) {}
+  };
+  fmBtn.addEventListener('click', () => {
+    if (fmTimer) { fmStop(); return; }
+    fmPeakVal = 0; fmLast = 0;
+    fmReadout.style.display = 'block';
+    fmBtn.classList.add('active');
+    fmTick();
+    fmTimer = setInterval(fmTick, 250);
   });
 
   // ── SW-AF 박스 드래그(영역 선택) ─────────────────────────────────────

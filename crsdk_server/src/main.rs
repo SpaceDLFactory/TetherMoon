@@ -942,6 +942,59 @@ async fn brightest(State(s): State<AppState>) -> Response {
     }
 }
 
+#[derive(serde::Deserialize)]
+struct FocusScoreReq {
+    x: Option<f64>,
+    y: Option<f64>,
+    roi: Option<f64>,
+}
+
+/// 라이브 초점 미터: 현재 프레임에서 (지정 지점 또는 가장 밝은 별) ROI의 선명도(라플라시안
+/// 분산)를 한 번 측정해 반환. 클라가 짧은 주기로 폴링하며 MF를 돌리면 값이 오르내리고 피크가
+/// 정확 초점이다 — Bahtinov 마스크 없이 수동 정밀 합초용. {score, x, y}.
+async fn focus_score(State(s): State<AppState>, Json(b): Json<FocusScoreReq>) -> Response {
+    if s.camera.lock().await.is_none() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "not connected").into_response();
+    }
+    let mut rx = s.lv_tx.subscribe();
+    while rx.try_recv().is_ok() {} // 쌓인 오래된 프레임 폐기
+    let mut frame = None;
+    for _ in 0..3 {
+        match tokio::time::timeout(Duration::from_millis(700), rx.recv()).await {
+            Ok(Ok(f)) => {
+                frame = Some(f);
+                break;
+            }
+            Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+            _ => break,
+        }
+    }
+    let frame = match frame {
+        Some(f) => f,
+        None => {
+            return (StatusCode::PRECONDITION_REQUIRED, "live view not running").into_response()
+        }
+    };
+    let roi = b.roi.unwrap_or(0.15).clamp(0.05, 0.5);
+    let fixed = b.x.zip(b.y);
+    let res = tokio::task::spawn_blocking(move || {
+        // 지정 지점 없으면 가장 밝은 별을 자동 타깃.
+        let (x, y) = match fixed {
+            Some(p) => p,
+            None => autofocus::brightest_point(&frame[..])?,
+        };
+        let score = autofocus::focus_measure(&frame[..], x, y, roi, roi)?;
+        Some((score, x, y))
+    })
+    .await;
+    match res {
+        Ok(Some((score, x, y))) => {
+            Json(serde_json::json!({ "score": score, "x": x, "y": y })).into_response()
+        }
+        _ => (StatusCode::NOT_FOUND, "no measurable point").into_response(),
+    }
+}
+
 /// 연속 AF: 초기 합초 후 모니터 루프 — ROI 선명도가 baseline 대비 threshold 미만으로
 /// 떨어지면(피사체 이동/카메라 흔들림) 재합초. /cancel(af_cancel=true)로 정지.
 /// 즉시 "started" 반환하고 백그라운드 진행, 상태는 /events SSE(af_continuous).
@@ -2440,6 +2493,7 @@ async fn main() {
         .route("/api/focus_nearfar/info", get(focus_nearfar_info))
         .route("/api/sw_autofocus", post(sw_autofocus))
         .route("/api/brightest", post(brightest)) // 가장 밝은 별 좌표 → Star AF
+        .route("/api/focus_score", post(focus_score)) // 라이브 초점 미터(선명도 폴링)
 
         .route("/api/sw_autofocus/continuous", post(sw_autofocus_continuous))
         .route("/api/sw_autofocus/cancel", post(sw_autofocus_cancel))
