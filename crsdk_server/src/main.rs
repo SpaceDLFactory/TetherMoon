@@ -1145,6 +1145,135 @@ async fn stack_preview(State(s): State<AppState>) -> Response {
     }
 }
 
+/// 저장 파일 한 장을 RGB8로 디코드. JPEG/HEIF는 직접, RAW(.arw)는 임베디드 JPEG로.
+/// (진짜 RAW 디코드 = 16bit 선형은 추후 stacker `raw` feature의 rawloader로 대체.)
+fn decode_to_rgb8(path: &std::path::Path, bytes: &[u8]) -> Option<(Vec<u8>, usize, usize)> {
+    let ext = path.extension()?.to_str()?.to_lowercase();
+    let jpeg: std::borrow::Cow<[u8]> = if ext == "arw" {
+        std::borrow::Cow::Owned(extract_embedded_jpeg(bytes)?)
+    } else {
+        std::borrow::Cow::Borrowed(bytes)
+    };
+    let mut dec = jpeg_decoder::Decoder::new(std::io::Cursor::new(jpeg.as_ref()));
+    let px = dec.decode().ok()?;
+    let info = dec.info()?;
+    let (w, h) = (info.width as usize, info.height as usize);
+    let rgb = match info.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => px,
+        jpeg_decoder::PixelFormat::L8 => {
+            let mut r = vec![0u8; w * h * 3];
+            for i in 0..w * h {
+                r[i * 3] = px[i];
+                r[i * 3 + 1] = px[i];
+                r[i * 3 + 2] = px[i];
+            }
+            r
+        }
+        _ => return None,
+    };
+    Some((rgb, w, h))
+}
+
+#[derive(serde::Deserialize)]
+struct FolderStackReq {
+    mode: Option<String>,
+    limit: Option<usize>,
+    dir: Option<String>, // 스택할 폴더(생략 시 저장 폴더)
+}
+
+/// 저장 폴더의 최근 촬영 프레임을 풀해상도로 포스트스택한다(라이브뷰보다 고화질). 파일을
+/// mtime 최신순으로 최대 limit장 골라 오래된→최신으로 정렬 누적하고 결과를 stack_preview에
+/// 넣는다(탭이 그대로 폴링). 카메라 불필요 — 파일만 읽는다. stack_active 가드로 라이브스택과
+/// 상호배타.
+async fn stack_folder(State(s): State<AppState>, Json(b): Json<FolderStackReq>) -> impl IntoResponse {
+    use std::sync::atomic::Ordering;
+    let dir = match b.dir.clone() {
+        Some(d) if !d.trim().is_empty() => d,
+        _ => s.save_path.lock().await.clone(),
+    };
+    if dir.is_empty() {
+        return (StatusCode::BAD_REQUEST, "no folder (set save path or pass dir)".to_string());
+    }
+    if s
+        .stack_active
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return (StatusCode::CONFLICT, "stack already running".to_string());
+    }
+    let mode = match b.mode.as_deref() {
+        Some("lighten") => stacker::Mode::Lighten,
+        _ => stacker::Mode::Average,
+    };
+    let limit = b.limit.unwrap_or(30).clamp(2, 200);
+    s.stack_count.store(0, Ordering::SeqCst);
+    s.stack_cancel.store(false, Ordering::SeqCst);
+    *s.stack_preview.lock().await = None;
+    let guard = RunGuard(s.stack_active.clone());
+    let cancel = s.stack_cancel.clone();
+    let count = s.stack_count.clone();
+    let preview = s.stack_preview.clone();
+    tokio::task::spawn_blocking(move || {
+        let _g = guard;
+        let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| {
+                let p = e.path();
+                let ext = p.extension()?.to_str()?.to_lowercase();
+                if matches!(ext.as_str(), "jpg" | "jpeg" | "arw") {
+                    let m = e.metadata().ok()?.modified().ok()?;
+                    Some((m, p))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        files.sort_by(|a, b| b.0.cmp(&a.0)); // 최신 먼저
+        files.truncate(limit);
+        files.reverse(); // 오래된→최신 (첫 장이 정렬 기준)
+        let mut stk: Option<stacker::Stacker> = None;
+        let mut dims: Option<(usize, usize)> = None;
+        for (_, path) in &files {
+            if cancel.load(Ordering::SeqCst) {
+                break;
+            }
+            let bytes = match std::fs::read(path) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let (rgb, w, h) = match decode_to_rgb8(path, &bytes) {
+                Some(v) => v,
+                None => continue,
+            };
+            match dims {
+                None => {
+                    dims = Some((w, h));
+                    stk = Some(stacker::Stacker::new(w, h, mode));
+                }
+                Some((sw, sh)) if sw == w && sh == h => {}
+                Some(_) => continue,
+            }
+            if stk.as_mut().unwrap().add(&rgb) {
+                count.store(stk.as_ref().unwrap().count(), Ordering::SeqCst);
+            }
+        }
+        if let (Some(st), Some((w, h))) = (&stk, dims) {
+            let out = st.render();
+            let mut jpeg = Vec::new();
+            if jpeg_encoder::Encoder::new(&mut jpeg, 92)
+                .encode(&out, w as u16, h as u16, jpeg_encoder::ColorType::Rgb)
+                .is_ok()
+            {
+                *preview.blocking_lock() = Some(jpeg);
+            }
+        }
+        tracing::info!("post-stack done ({} frames)", count.load(Ordering::SeqCst));
+    });
+    (StatusCode::OK, "post-stack started".to_string())
+}
+
 /// 연속 AF: 초기 합초 후 모니터 루프 — ROI 선명도가 baseline 대비 threshold 미만으로
 /// 떨어지면(피사체 이동/카메라 흔들림) 재합초. /cancel(af_cancel=true)로 정지.
 /// 즉시 "started" 반환하고 백그라운드 진행, 상태는 /events SSE(af_continuous).
@@ -2633,6 +2762,7 @@ async fn main() {
         .route("/api/stack/stop", post(stack_stop))
         .route("/api/stack/status", get(stack_status))
         .route("/api/stack/preview", get(stack_preview))
+        .route("/api/stack/folder", post(stack_folder)) // 저장 프레임 풀해상도 포스트스택
         .route("/api/_debug/level", get(level_info))
         .route("/api/_debug/afframe", get(af_frame_info))
         .route("/api/shutter/down", post(shutter_down))

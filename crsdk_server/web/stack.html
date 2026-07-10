@@ -84,6 +84,12 @@
     </select>
     <button id="startBtn" type="button">Start</button>
     <button class="nav" id="saveBtn" type="button" title="Open the current stack in a new tab to save">Save…</button>
+    <span style="flex:1"></span>
+    <input id="dir" type="text" placeholder="folder (blank = save folder)" title="Folder to post-stack; blank uses the camera save folder"
+           style="width:180px;background:var(--bg-3);color:var(--fg);border:1px solid var(--border);border-radius:8px;padding:8px;">
+    <input id="limit" type="number" min="2" max="200" value="30" title="Frames to post-stack"
+           style="width:60px;background:var(--bg-3);color:var(--fg);border:1px solid var(--border);border-radius:8px;padding:8px;">
+    <button class="nav" id="folderBtn" type="button" title="Stack the most recent captures at full resolution (JPEG; ARW uses its embedded preview)">Post-stack saved ▶</button>
   </div>
   <div class="hint">
     Live-view (JPEG) stack for framing / SNR preview — not a final-quality RAW stack.
@@ -141,6 +147,19 @@
 
   saveBtn.addEventListener('click', () => {
     window.open('/api/stack/preview?t=' + Date.now(), '_blank'); // 새 탭 → 길게 눌러 저장
+  });
+
+  // 저장 프레임 풀해상도 포스트스택 (라이브뷰보다 고화질). 진행은 status/preview 폴링으로.
+  const folderBtn = $('#folderBtn'), limitEl = $('#limit'), dirEl = $('#dir');
+  folderBtn.addEventListener('click', async () => {
+    if (running) return;
+    try {
+      const r = await fetch('/api/stack/folder', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ mode: modeSel.value, limit: parseInt(limitEl.value,10) || 30, dir: dirEl.value.trim() || undefined }) });
+      if (!r.ok) { toast('Post-stack: ' + (await r.text())); return; }
+      toast('Post-stacking saved frames…'); setUI(true);
+    } catch (e) { toast('Post-stack 실패'); }
   });
 
   // 붉은 야간 모드 (Console과 localStorage 'night' 공유)
