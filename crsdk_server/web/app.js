@@ -12,7 +12,7 @@
       'grid.thirds':'Rule of thirds','grid.persp':'Perspective','grid.diag':'Diagonal',
       'title.zoom':'100% focus check (click = point)','title.grid':'Toggle grid','title.rotate':'Rotate live view','title.night':'Night vision (red)',
       'card.histogram':'Histogram','card.exposure':'Exposure','card.fileformat':'File Format','card.pictureprofile':'Picture Profile',
-      'card.bulb':'Bulb Timer','card.interval':'Interval (Timelapse)','card.drivemetering':'Drive · Metering','card.focus':'Focus Mode','card.saveto':'Save To','card.recent':'Recent',
+      'card.bulb':'Bulb Timer','card.interval':'Interval (Timelapse)','card.bracket':'Exposure Bracket (AEB)','lbl.frames':'Frames','lbl.evstep':'EV step','btn.bracketstart':'Start','hint.bracket':'Brackets exposure compensation around the current value; each frame steps N places in the EV list and waits for each download (RAW ~8s). Stop via Interval Stop.','card.drivemetering':'Drive · Metering','card.focus':'Focus Mode','card.saveto':'Save To','card.recent':'Recent',
       'lbl.colortemp':'Color temp','lbl.expsec':'Exposure (s)','lbl.intervalsec':'Interval (s)','lbl.count':'Count','lbl.afarea':'AF area',
       'btn.bulbstart':'Start','btn.intervalstart':'Start','btn.afcenter':'AF center','btn.half':'Half-press (hold → AF)','btn.cancel':'Cancel','btn.peakoff':'Peaking OFF','btn.peakon':'Peaking ON',
       'opt.flexs':'Flexible S','opt.flexm':'Flexible M','opt.flexl':'Flexible L',
@@ -35,7 +35,7 @@
       'grid.thirds':'3분할','grid.persp':'소실점','grid.diag':'대각선',
       'title.zoom':'100% 확대 초점확인 (클릭=지점 선택)','title.grid':'3분할 그리드 토글','title.rotate':'라이브뷰 회전','title.night':'야간 모드 (붉은 화면)',
       'card.histogram':'히스토그램','card.exposure':'노출','card.fileformat':'파일 형식','card.pictureprofile':'픽처 프로파일',
-      'card.bulb':'벌브 타이머','card.interval':'인터벌 (타임랩스)','card.drivemetering':'드라이브 · 측광','card.focus':'포커스 모드','card.saveto':'저장 위치','card.recent':'최근',
+      'card.bulb':'벌브 타이머','card.interval':'인터벌 (타임랩스)','card.bracket':'노출 브라케팅 (AEB)','lbl.frames':'장수','lbl.evstep':'EV 스텝','btn.bracketstart':'시작','hint.bracket':'현재 노출보정 기준으로 브라케팅. 각 장은 EV 목록에서 N칸씩 이동하고 다운로드 완료를 기다림(RAW ~8s). 중단은 인터벌 정지로.','card.drivemetering':'드라이브 · 측광','card.focus':'포커스 모드','card.saveto':'저장 위치','card.recent':'최근',
       'lbl.colortemp':'색온도','lbl.expsec':'노출(초)','lbl.intervalsec':'간격(초)','lbl.count':'장수','lbl.afarea':'AF 영역',
       'btn.bulbstart':'노출 시작','btn.intervalstart':'시작','btn.afcenter':'AF 중앙','btn.half':'반셔터 (누르고 유지 → AF)','btn.cancel':'촬영 취소','btn.peakoff':'피킹 OFF','btn.peakon':'피킹 ON',
       'opt.flexs':'플렉서블 S','opt.flexm':'플렉서블 M','opt.flexl':'플렉서블 L',
@@ -58,7 +58,7 @@
       'grid.thirds':'三分割','grid.persp':'消失点','grid.diag':'対角線',
       'title.zoom':'100% 拡大ピント確認（クリック＝位置）','title.grid':'三分割グリッド切替','title.rotate':'ライブビュー回転','title.night':'ナイトモード（赤い画面）',
       'card.histogram':'ヒストグラム','card.exposure':'露出','card.fileformat':'ファイル形式','card.pictureprofile':'ピクチャープロファイル',
-      'card.bulb':'バルブタイマー','card.interval':'インターバル（タイムラプス）','card.drivemetering':'ドライブ・測光','card.focus':'フォーカスモード','card.saveto':'保存先','card.recent':'最近',
+      'card.bulb':'バルブタイマー','card.interval':'インターバル（タイムラプス）','card.bracket':'露出ブラケット (AEB)','lbl.frames':'枚数','lbl.evstep':'EV ステップ','btn.bracketstart':'開始','hint.bracket':'現在の露出補正を基準にブラケット。各枚は EV リストを N 段ずつ移動し、各ダウンロードを待機（RAW ~8s）。中断はインターバル停止で。','card.drivemetering':'ドライブ・測光','card.focus':'フォーカスモード','card.saveto':'保存先','card.recent':'最近',
       'lbl.colortemp':'色温度','lbl.expsec':'露出(秒)','lbl.intervalsec':'間隔(秒)','lbl.count':'枚数','lbl.afarea':'AF エリア',
       'btn.bulbstart':'露出開始','btn.intervalstart':'開始','btn.afcenter':'AF 中央','btn.half':'半押し（長押し→AF）','btn.cancel':'撮影キャンセル','btn.peakoff':'ピーキング OFF','btn.peakon':'ピーキング ON',
       'opt.flexs':'フレキシブル S','opt.flexm':'フレキシブル M','opt.flexl':'フレキシブル L',
@@ -320,6 +320,24 @@
     };
     tick();                                          // 첫 샷 즉시
     ivTimer = setInterval(tick, interval * 1000);
+  });
+
+  // ── 노출 브라케팅(AEB) → /api/bracket. 진행은 SSE 'bracket'가 갱신, 중단은 인터벌 정지 ──
+  const brFrames = document.getElementById('brFrames');
+  const brStep = document.getElementById('brStep');
+  const brBtn = document.getElementById('brBtn');
+  const brSet = (txt) => { brBtn.textContent = txt; };
+  brBtn.addEventListener('click', async () => {
+    const frames = parseInt(brFrames.value, 10) || 5;
+    const step = Math.max(1, Math.min(5, parseInt(brStep.value, 10) || 1));
+    try {
+      const r = await fetch('/api/bracket', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ frames, step }),
+      });
+      if (!r.ok) { toast('Bracket: ' + (await r.text()), 'err'); return; }
+      brSet('Bracket…');
+    } catch (e) { toast('Bracket 실패', 'err'); }
   });
 
   // ── 다중노출 (소프트웨어) ─────────────────────────────────────────────
@@ -753,6 +771,11 @@
         meSetStatus('Blended ✓');
         showPreview();
         addToFilmstrip();
+        break;
+      case 'bracket':                // 노출 브라케팅 진행/완료
+        if (ev.error) { toast('Bracket: ' + ev.error, 'err'); brSet(t('btn.bracketstart')); }
+        else if (ev.finished) { toast('Bracket ✓', 'ok'); brSet(t('btn.bracketstart')); }
+        else brSet(`Bracket ${ev.done}/${ev.total}…`);
         break;
       // warning / lv_property_changed 등은 조용히 무시
     }

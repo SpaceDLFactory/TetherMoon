@@ -1466,8 +1466,128 @@ async fn interval_start(State(s): State<AppState>, Json(b): Json<IntervalReq>) -
 
 async fn interval_stop(State(s): State<AppState>) -> impl IntoResponse {
     // 실행 가드(interval_active)는 소유 태스크가 해제. 여기선 취소 신호만.
+    // (브라케팅도 같은 가드를 쓰므로 이 stop이 브라케팅도 중단시킨다.)
     s.interval_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
     (StatusCode::OK, "stopped".to_string())
+}
+
+/// EV 브라케팅 촬영 순서의 allowed-list 인덱스들. 현재 인덱스 base 기준 대칭 오프셋
+/// (frames=5,step=1 → 오프셋 -2,-1,0,+1,+2)을 리스트 경계로 클램프한다. 짝수 frames는
+/// 아래로 한 칸 더 치우친다(-half..). 리스트가 비면 빈 벡터.
+fn bracket_indices(base: usize, len: usize, frames: usize, step: usize) -> Vec<usize> {
+    if len == 0 {
+        return Vec::new();
+    }
+    let step = step.max(1) as isize;
+    let half = (frames / 2) as isize;
+    (0..frames as isize)
+        .map(|k| ((base as isize) + (k - half) * step).clamp(0, len as isize - 1) as usize)
+        .collect()
+}
+
+#[derive(serde::Deserialize)]
+struct BracketReq {
+    frames: usize,
+    step: usize,
+}
+
+/// 노출 브라케팅(AEB): 현재 노출보정(EV comp)을 기준으로 카메라의 EV allowed 리스트를
+/// 인덱스로 스텝하며 frames장 촬영한다. 각 장은 노출 반영 settle 후 촬영하고 다음 노출로
+/// 바꾸기 전 다운로드 완료를 기다린다. 끝나면 EV를 원래 값으로 복원. 인터벌 가드를 재사용해
+/// 시퀀스 촬영끼리 상호배타이며, /api/interval/stop 으로 중단된다. 진행은 /events SSE(bracket).
+async fn bracket_start(State(s): State<AppState>, Json(b): Json<BracketReq>) -> impl IntoResponse {
+    use std::sync::atomic::Ordering;
+    const EV: u32 = crsdk::properties::code::EXPOSURE_BIAS_COMPENSATION;
+    let frames = b.frames.clamp(2, 9);
+    let step = b.step.clamp(1, 5);
+    let handle = {
+        let g = s.camera.lock().await;
+        match &*g {
+            Some(c) => c.0.device_handle(),
+            None => return (StatusCode::SERVICE_UNAVAILABLE, "not connected".to_string()),
+        }
+    };
+    if s
+        .interval_active
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return (StatusCode::CONFLICT, "sequence already running".to_string());
+    }
+    s.interval_cancel.store(false, Ordering::SeqCst);
+    let guard = RunGuard(s.interval_active.clone());
+    let cancel = s.interval_cancel.clone();
+    let events = s.events_tx.clone();
+    tokio::spawn(async move {
+        let _guard = guard; // 종료 시 interval_active 해제
+        let prop =
+            tokio::task::spawn_blocking(move || crsdk::properties::get(handle, EV)).await;
+        let (allowed, base_val) = match prop {
+            Ok(Ok(Some(p))) if !p.allowed.is_empty() => (p.allowed, p.current),
+            _ => {
+                tracing::warn!("bracket: EV comp not available on this body");
+                let _ = events.send(
+                    serde_json::json!({"type":"bracket","error":"no EV comp"}).to_string(),
+                );
+                return;
+            }
+        };
+        let base_idx = allowed
+            .iter()
+            .position(|&v| v == base_val)
+            .unwrap_or(allowed.len() / 2);
+        let idxs = bracket_indices(base_idx, allowed.len(), frames, step);
+        let mut rx = events.subscribe();
+        for (i, &idx) in idxs.iter().enumerate() {
+            if cancel.load(Ordering::SeqCst) {
+                break;
+            }
+            let val = allowed[idx];
+            let _ = tokio::task::spawn_blocking(move || crsdk::properties::set(handle, EV, val))
+                .await;
+            tokio::time::sleep(Duration::from_millis(300)).await; // 노출 반영 settle
+            let _ = tokio::task::spawn_blocking(move || capture_one(handle)).await;
+            // 다음 노출로 바꾸기 전 다운로드 완료 대기(RAW ~8s). 실패해도 계속.
+            let _ = wait_jpeg_download(&mut rx, Duration::from_secs(15)).await;
+            let _ = events.send(
+                serde_json::json!({"type":"bracket","done":i+1,"total":frames}).to_string(),
+            );
+        }
+        // EV 원복
+        let _ =
+            tokio::task::spawn_blocking(move || crsdk::properties::set(handle, EV, base_val)).await;
+        let _ = events
+            .send(serde_json::json!({"type":"bracket","done":frames,"total":frames,"finished":true}).to_string());
+        tracing::info!("bracket done");
+    });
+    (StatusCode::OK, format!("bracket {frames}f step{step}"))
+}
+
+#[cfg(test)]
+mod bracket_tests {
+    use super::bracket_indices;
+
+    #[test]
+    fn symmetric_around_base() {
+        // base=5, 리스트 충분, frames=5, step=1 → 3,4,5,6,7
+        assert_eq!(bracket_indices(5, 11, 5, 1), vec![3, 4, 5, 6, 7]);
+    }
+    #[test]
+    fn step_scales_offsets() {
+        // step=2 → 1,3,5,7,9
+        assert_eq!(bracket_indices(5, 11, 5, 2), vec![1, 3, 5, 7, 9]);
+    }
+    #[test]
+    fn clamps_at_edges() {
+        // base=0이면 아래로 못 가 0에서 클램프
+        assert_eq!(bracket_indices(0, 5, 5, 1), vec![0, 0, 0, 1, 2]);
+        // base=끝이면 위로 클램프
+        assert_eq!(bracket_indices(4, 5, 3, 1), vec![3, 4, 4]);
+    }
+    #[test]
+    fn empty_list() {
+        assert_eq!(bracket_indices(0, 0, 3, 1), Vec::<usize>::new());
+    }
 }
 
 // ── 동영상 녹화 (MovieRecord) ────────────────────────────────────────────
@@ -2221,6 +2341,7 @@ async fn main() {
         .route("/api/bulb", post(bulb))
         .route("/api/interval", post(interval_start))
         .route("/api/interval/stop", post(interval_stop))
+        .route("/api/bracket", post(bracket_start)) // 노출 브라케팅(AEB)
         .route("/api/_debug/level", get(level_info))
         .route("/api/_debug/afframe", get(af_frame_info))
         .route("/api/shutter/down", post(shutter_down))

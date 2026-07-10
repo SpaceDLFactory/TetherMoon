@@ -134,6 +134,20 @@
     </div>
 
     <div class="card">
+      <h3 data-i18n="card.bracket">Exposure Bracket (AEB)</h3>
+      <div class="row"><span class="k" data-i18n="lbl.frames">Frames</span>
+        <select class="sel" id="brFrames" style="flex:0 0 auto;">
+          <option value="3">3</option><option value="5" selected>5</option><option value="7">7</option>
+        </select>
+      </div>
+      <div class="row"><span class="k" data-i18n="lbl.evstep">EV step</span><input class="path-in" id="brStep" type="number" min="1" max="5" value="1" style="width:90px;flex:0 0 auto;"></div>
+      <button class="btn" id="brBtn" type="button" data-i18n="btn.bracketstart" style="width:100%;margin-top:6px;">Start</button>
+      <div class="row" style="margin-top:6px;color:var(--fg-mute);font-size:10px;">
+        <span data-i18n="hint.bracket">Brackets exposure compensation around the current value. Each frame steps N places in the camera's EV list; waits for each download (RAW ~8s). Stop via the Interval Stop.</span>
+      </div>
+    </div>
+
+    <div class="card">
       <h3>Multi-Exposure</h3>
       <div class="row"><span class="k" data-i18n="lbl.count">Count</span><input class="path-in" id="meCount" type="number" min="2" max="30" value="3" style="width:90px;flex:0 0 auto;"></div>
       <div class="row"><span class="k">Blend</span>
