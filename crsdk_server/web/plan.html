@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<!-- TetherMoon 촬영계획: 내 위치 + 시각 기준으로 대상(해·달·행성 + 사용자 추가)의
+     고도/방위/가시성을 계산해 "지금 발코니에서 뭘 찍을까"를 돕는다. 카메라·서버 불필요
+     (순수 클라 천문계산). 라이브뷰 오버레이가 아님 — 카메라 방향을 알 수 없어서 계획 패널.
+     알고리즘: Paul Schlyter, "Computing planetary positions"(stjarnhimlen). 정밀도 근사
+     (행성 ~arcmin, "떴나/얼마나 높나"엔 충분). -->
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TetherMoon · Plan</title>
+<style>
+  :root{ --bg:#1f1f1f;--bg-2:#2a2a2a;--bg-3:#303030;--fg:#e8e8e8;--fg-dim:#9b9b9b;--fg-mute:#6a6a6a;
+    --accent:#4a9eff;--good:#34d399;--warn:#eab308;--border:#3a3a3a; }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;height:100%;}
+  body{background:var(--bg);color:var(--fg);font:14px/1.4 -apple-system,system-ui,sans-serif;
+    display:flex;flex-direction:column;min-height:100dvh;}
+  body.night{filter:brightness(0.62) sepia(1) saturate(4) hue-rotate(-48deg);}
+  .topbar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg-2);
+    border-bottom:1px solid var(--border);font-size:13px;}
+  .topbar .title{font-weight:700;} .topbar .sp{flex:1;}
+  a.nav,button.nav{color:var(--fg-dim);text-decoration:none;background:var(--bg-3);border:1px solid var(--border);
+    border-radius:8px;padding:6px 10px;font-size:13px;cursor:pointer;}
+  button.nav.on{background:var(--accent);border-color:var(--accent);color:#fff;}
+  .bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 12px;background:var(--bg-2);
+    border-bottom:1px solid var(--border);}
+  .bar label{color:var(--fg-dim);font-size:12px;}
+  input,select{background:var(--bg-3);color:var(--fg);border:1px solid var(--border);border-radius:8px;
+    padding:7px 8px;font-size:14px;}
+  input.sm{width:92px;} input.xs{width:64px;}
+  button.act{background:var(--accent);border:1px solid var(--accent);color:#fff;border-radius:8px;
+    padding:7px 12px;font-size:14px;font-weight:600;cursor:pointer;}
+  .when{font-size:12px;color:var(--fg-dim);}
+  table{width:100%;border-collapse:collapse;}
+  th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--border);font-variant-numeric:tabular-nums;}
+  th{color:var(--fg-dim);font-size:11px;font-weight:600;letter-spacing:.04em;}
+  td.alt{font-weight:700;} .up{color:var(--good);} .low{color:var(--warn);} .below{color:var(--fg-mute);}
+  .name{font-weight:600;} .del{color:var(--fg-mute);cursor:pointer;border:none;background:none;font-size:14px;}
+  .altbar{height:6px;background:var(--bg-3);border-radius:3px;overflow:hidden;margin-top:3px;width:120px;}
+  .altbar>div{height:100%;background:var(--accent);}
+  .add{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 12px;border-top:1px solid var(--border);}
+  .hint{color:var(--fg-mute);font-size:11px;padding:8px 12px;}
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="title">TetherMoon · Plan 🔭</span>
+    <span class="sp"></span>
+    <button class="nav" id="nightBtn" type="button" title="야간 모드">🌙</button>
+    <a class="nav" href="/web/index.html">← Console</a>
+  </div>
+
+  <div class="bar">
+    <label>Lat</label><input class="sm" id="lat" type="number" step="0.001" placeholder="37.5">
+    <label>Lon</label><input class="sm" id="lon" type="number" step="0.001" placeholder="127.0">
+    <button class="nav" id="geoBtn" type="button" title="Use device location">📍 My location</button>
+    <span class="sp"></span>
+    <button class="nav" id="minus">−1h</button>
+    <span class="when" id="when">now</span>
+    <button class="nav" id="plus">+1h</button>
+    <button class="nav" id="nowBtn">Now</button>
+  </div>
+
+  <table>
+    <thead><tr><th>Target</th><th>Alt</th><th>Dir</th><th>Status</th><th></th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <div class="add">
+    <span style="color:var(--fg-dim);font-size:12px;">Add target:</span>
+    <input class="xs" id="tName" placeholder="Name">
+    <label>RA(h)</label><input class="xs" id="tRA" type="number" step="0.01" placeholder="5.58">
+    <label>Dec(°)</label><input class="xs" id="tDec" type="number" step="0.01" placeholder="-5.4">
+    <button class="act" id="addBtn">Add</button>
+    <span style="color:var(--fg-mute);font-size:11px;">e.g. Orion Nebula 5.59 / -5.39 · Polaris 2.53 / 89.26</span>
+  </div>
+  <div class="hint">Altitude &gt; 0 = above the horizon. Higher = better (less air). Planets/Moon are approximate (~arcmin).
+    Custom targets are fixed RA/Dec (stars, deep-sky). Saved locally.</div>
+
+<script>
+  // ── 천문 계산 (Schlyter) ────────────────────────────────────────────────
+  const D=180/Math.PI, R=Math.PI/180;
+  const sin=x=>Math.sin(x*R), cos=x=>Math.cos(x*R), tan=x=>Math.tan(x*R);
+  const asin=x=>Math.asin(x)*D, atan2=(y,x)=>Math.atan2(y,x)*D;
+  const rev=x=>{ x%=360; return x<0?x+360:x; };
+
+  function dayNum(dt){ // dt: JS Date
+    const Y=dt.getUTCFullYear(),M=dt.getUTCMonth()+1,Dd=dt.getUTCDate();
+    const UT=dt.getUTCHours()+dt.getUTCMinutes()/60+dt.getUTCSeconds()/3600;
+    const d=367*Y - Math.floor(7*(Y+Math.floor((M+9)/12))/4) + Math.floor(275*M/9) + Dd - 730530;
+    return { d:d+UT/24, UT };
+  }
+  function eclObl(d){ return 23.4393 - 3.563e-7*d; }
+
+  // 궤도요소 → 지심 적도좌표 RA(도),Dec(도). Sun 위치(태양의 지심 직교 xs,ys) 전달.
+  function sunPos(d){
+    const w=282.9404+4.70935e-5*d, e=0.016709-1.151e-9*d, M=rev(356.0470+0.9856002585*d);
+    let E=M + e*D*sin(M)*(1+e*cos(M));
+    const xv=cos(E)-e, yv=Math.sqrt(1-e*e)*sin(E);
+    const v=atan2(yv,xv), r=Math.sqrt(xv*xv+yv*yv);
+    const lon=rev(v+w);
+    const xs=r*cos(lon), ys=r*sin(lon);
+    const o=eclObl(d);
+    const xe=xs, ye=ys*cos(o), ze=ys*sin(o);
+    return { RA:rev(atan2(ye,xe)), Dec:asin(ze/Math.sqrt(xe*xe+ye*ye+ze*ze)),
+             xs, ys, Ls:rev(w+M), M, w, r, lon };
+  }
+
+  // GMST0(도) = Ls + 180. LST(도) = GMST0 + UT*15 + lon_obs.
+  function lstDeg(sun, UT, lonObs){ return rev(sun.Ls + 180 + UT*15 + lonObs); }
+
+  function eclToEq(xh, yh, zh, o){ // 황도 직교 → 적도 RA/Dec
+    const xe=xh, ye=yh*cos(o)-zh*sin(o), ze=yh*sin(o)+zh*cos(o);
+    return { RA:rev(atan2(ye,xe)), Dec:asin(ze/Math.sqrt(xe*xe+ye*ye+ze*ze)) };
+  }
+
+  function planetPos(el, d, sun){
+    const N=rev(el.N(d)), i=el.i(d), w=rev(el.w(d)), a=el.a(d), e=el.e(d), M=rev(el.M(d));
+    let E=M + e*D*sin(M)*(1+e*cos(M));
+    for(let k=0;k<5;k++){ E = E - (E - e*D*sin(E) - M)/(1 - e*cos(E)); } // 반복 정제
+    const xv=a*(cos(E)-e), yv=a*Math.sqrt(1-e*e)*sin(E);
+    const v=atan2(yv,xv), r=Math.sqrt(xv*xv+yv*yv);
+    // 황도 직교(태양중심)
+    const xh=r*(cos(N)*cos(v+w) - sin(N)*sin(v+w)*cos(i));
+    const yh=r*(sin(N)*cos(v+w) + cos(N)*sin(v+w)*cos(i));
+    const zh=r*(sin(v+w)*sin(i));
+    // 지심 = 태양중심 + 태양의 지심위치
+    return eclToEq(xh+sun.xs, yh+sun.ys, zh, eclObl(d));
+  }
+
+  function moonPos(d, sun){
+    const N=rev(125.1228-0.0529538083*d), i=5.1454, w=rev(318.0634+0.1643573223*d),
+      a=60.2666, e=0.054900, M=rev(115.3654+13.0649929509*d);
+    let E=M + e*D*sin(M)*(1+e*cos(M));
+    for(let k=0;k<3;k++){ E = E - (E - e*D*sin(E) - M)/(1 - e*cos(E)); }
+    const xv=a*(cos(E)-e), yv=a*Math.sqrt(1-e*e)*sin(E);
+    const v=atan2(yv,xv), r=Math.sqrt(xv*xv+yv*yv);
+    let xh=r*(cos(N)*cos(v+w) - sin(N)*sin(v+w)*cos(i));
+    let yh=r*(sin(N)*cos(v+w) + cos(N)*sin(v+w)*cos(i));
+    let zh=r*(sin(v+w)*sin(i));
+    // 황경/황위 + 주요 섭동(Schlyter)
+    let lon=rev(atan2(yh,xh)), lat=atan2(zh,Math.sqrt(xh*xh+yh*yh));
+    const Ls=sun.Ls, Lm=rev(N+w+M), Ms=sun.M, Mm=M, Dm=rev(Lm-Ls), F=rev(Lm-N);
+    lon += -1.274*sin(Mm-2*Dm) +0.658*sin(2*Dm) -0.186*sin(Ms) -0.059*sin(2*Mm-2*Dm)
+          -0.057*sin(Mm-2*Dm+Ms) +0.053*sin(Mm+2*Dm) +0.046*sin(2*Dm-Ms) +0.041*sin(Mm-Ms)
+          -0.035*sin(Dm) -0.031*sin(Mm+Ms) -0.015*sin(2*F-2*Dm) +0.011*sin(Mm-4*Dm);
+    lat += -0.173*sin(F-2*Dm) -0.055*sin(Mm-F-2*Dm) -0.046*sin(Mm+F-2*Dm)
+          +0.033*sin(F+2*Dm) +0.017*sin(2*Mm+F);
+    const xg=cos(lon)*cos(lat), yg=sin(lon)*cos(lat), zg=sin(lat);
+    return eclToEq(xg,yg,zg, eclObl(d));
+  }
+
+  // RA/Dec(도) → alt/az(관측지 위도/LST). az: 북=0, 동=90 시계방향.
+  function altaz(RA, Dec, lstD, lat){
+    const HA=rev(lstD - RA);
+    const alt=asin(sin(lat)*sin(Dec) + cos(lat)*cos(Dec)*cos(HA));
+    const az=rev(atan2(-cos(Dec)*sin(HA), sin(Dec)*cos(lat)-cos(Dec)*cos(HA)*sin(lat)));
+    return { alt, az };
+  }
+  const compass=az=>['N','NE','E','SE','S','SW','W','NW'][Math.round(rev(az)/45)%8];
+
+  const P={
+    Mercury:{N:d=>48.3313+3.24587e-5*d,i:d=>7.0047+5.00e-8*d,w:d=>29.1241+1.01444e-5*d,a:_=>0.387098,e:d=>0.205635+5.59e-10*d,M:d=>168.6562+4.0923344368*d},
+    Venus:{N:d=>76.6799+2.46590e-5*d,i:d=>3.3946+2.75e-8*d,w:d=>54.8910+1.38374e-5*d,a:_=>0.723330,e:d=>0.006773-1.302e-9*d,M:d=>48.0052+1.6021302244*d},
+    Mars:{N:d=>49.5574+2.11081e-5*d,i:d=>1.8497-1.78e-8*d,w:d=>286.5016+2.92961e-5*d,a:_=>1.523688,e:d=>0.093405+2.516e-9*d,M:d=>18.6021+0.5240207766*d},
+    Jupiter:{N:d=>100.4542+2.76854e-5*d,i:d=>1.3030-1.557e-7*d,w:d=>273.8777+1.64505e-5*d,a:_=>5.20256,e:d=>0.048498+4.469e-9*d,M:d=>19.8950+0.0830853001*d},
+    Saturn:{N:d=>113.6634+2.38980e-5*d,i:d=>2.4886-1.081e-7*d,w:d=>339.3939+2.97661e-5*d,a:_=>9.55475,e:d=>0.055546-9.499e-9*d,M:d=>316.9670+0.0334442282*d},
+  };
+
+  // 대상 목록 = 내장(계산형) + 사용자(고정 RA/Dec). status 계산.
+  function computeAll(dt, lat, lon){
+    const {d,UT}=dayNum(dt); const sun=sunPos(d); const L=lstDeg(sun,UT,lon);
+    const out=[];
+    const push=(name,RA,Dec)=>{ const {alt,az}=altaz(RA,Dec,L,lat); out.push({name,alt,az}); };
+    push('Sun', sun.RA, sun.Dec);
+    const m=moonPos(d,sun); push('Moon', m.RA, m.Dec);
+    for(const k of Object.keys(P)){ const p=planetPos(P[k],d,sun); push(k,p.RA,p.Dec); }
+    for(const t of custom){ push(t.name, t.ra*15, t.dec); } // RA h→deg
+    return out;
+  }
+
+  // ── UI/상태 ─────────────────────────────────────────────────────────────
+  const $=s=>document.querySelector(s);
+  let custom = JSON.parse(localStorage.getItem('plan_targets')||'[]');
+  let offsetH = 0;
+  const saveCustom=()=>localStorage.setItem('plan_targets', JSON.stringify(custom));
+
+  function loc(){ return { lat:parseFloat($('#lat').value), lon:parseFloat($('#lon').value) }; }
+  function when(){ const dt=new Date(Date.now()+offsetH*3600e3); return dt; }
+
+  function render(){
+    const {lat,lon}=loc();
+    const dt=when();
+    $('#when').textContent = offsetH===0 ? 'now' : (offsetH>0?'+':'')+offsetH+'h · '+dt.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+    const tb=$('#rows'); tb.innerHTML='';
+    if(!isFinite(lat)||!isFinite(lon)){ tb.innerHTML='<tr><td colspan="5" style="color:var(--fg-mute)">Enter your latitude &amp; longitude.</td></tr>'; return; }
+    const rows=computeAll(dt,lat,lon).sort((a,b)=>b.alt-a.alt);
+    for(const r of rows){
+      const up=r.alt>25, low=r.alt>0&&r.alt<=25;
+      const cls=up?'up':(low?'low':'below');
+      const status=r.alt<=0?'below horizon':(up?'well placed':'low');
+      const isCustom=custom.some(t=>t.name===r.name);
+      const tr=document.createElement('tr');
+      tr.innerHTML=`<td class="name">${r.name}</td>`+
+        `<td class="alt ${cls}">${r.alt.toFixed(0)}°<div class="altbar"><div style="width:${Math.max(0,Math.min(100,r.alt/90*100))}%"></div></div></td>`+
+        `<td>${r.alt>0?compass(r.az)+' '+r.az.toFixed(0)+'°':'—'}</td>`+
+        `<td class="${cls}">${status}</td>`+
+        `<td>${isCustom?'<button class="del" title="remove">✕</button>':''}</td>`;
+      if(isCustom) tr.querySelector('.del').addEventListener('click',()=>{ custom=custom.filter(t=>t.name!==r.name); saveCustom(); render(); });
+      tb.appendChild(tr);
+    }
+  }
+
+  $('#lat').addEventListener('change',()=>{ localStorage.setItem('plan_lat',$('#lat').value); render(); });
+  $('#lon').addEventListener('change',()=>{ localStorage.setItem('plan_lon',$('#lon').value); render(); });
+  $('#minus').addEventListener('click',()=>{ offsetH--; render(); });
+  $('#plus').addEventListener('click',()=>{ offsetH++; render(); });
+  $('#nowBtn').addEventListener('click',()=>{ offsetH=0; render(); });
+  $('#geoBtn').addEventListener('click',()=>{
+    if(!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(p=>{
+      $('#lat').value=p.coords.latitude.toFixed(3); $('#lon').value=p.coords.longitude.toFixed(3);
+      localStorage.setItem('plan_lat',$('#lat').value); localStorage.setItem('plan_lon',$('#lon').value); render();
+    });
+  });
+  $('#addBtn').addEventListener('click',()=>{
+    const name=$('#tName').value.trim(), ra=parseFloat($('#tRA').value), dec=parseFloat($('#tDec').value);
+    if(!name||!isFinite(ra)||!isFinite(dec)) return;
+    custom=custom.filter(t=>t.name!==name); custom.push({name,ra,dec}); saveCustom();
+    $('#tName').value=$('#tRA').value=$('#tDec').value=''; render();
+  });
+
+  // 야간 모드 (Console과 localStorage 'night' 공유)
+  const nightBtn=$('#nightBtn');
+  const applyNight=on=>{ document.body.classList.toggle('night',on); nightBtn.classList.toggle('on',on); };
+  applyNight(localStorage.getItem('night')==='1');
+  nightBtn.addEventListener('click',()=>{ const on=!document.body.classList.contains('night');
+    applyNight(on); localStorage.setItem('night',on?'1':'0'); });
+
+  // 초기화
+  $('#lat').value=localStorage.getItem('plan_lat')||'';
+  $('#lon').value=localStorage.getItem('plan_lon')||'';
+  render();
+  setInterval(()=>{ if(offsetH===0) render(); }, 60000); // 1분마다 갱신(now일 때)
+</script>
+</body>
+</html>
