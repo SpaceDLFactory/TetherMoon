@@ -1214,6 +1214,8 @@ struct FolderStackReq {
     limit: Option<usize>,
     dir: Option<String>,  // 스택할 폴더(생략 시 저장 폴더)
     best: Option<f32>,    // lucky imaging: 선명한 상위 비율(0~1)만 스택. 생략=전부
+    #[cfg_attr(not(feature = "raw"), allow(dead_code))] // raw feature에서만 사용
+    linear: Option<bool>, // true면 RAW를 선형광 f32로 누적(--features raw, ARW만). 고SNR.
 }
 
 /// 저장 폴더의 최근 촬영 프레임을 풀해상도로 포스트스택한다(라이브뷰보다 고화질). 파일을
@@ -1242,6 +1244,8 @@ async fn stack_folder(State(s): State<AppState>, Json(b): Json<FolderStackReq>) 
     };
     let limit = b.limit.unwrap_or(30).clamp(2, 200);
     let best = b.best;
+    #[cfg(feature = "raw")]
+    let linear = b.linear.unwrap_or(false);
     s.stack_count.store(0, Ordering::SeqCst);
     s.stack_cancel.store(false, Ordering::SeqCst);
     *s.stack_preview.lock().await = None;
@@ -1297,6 +1301,33 @@ async fn stack_folder(State(s): State<AppState>, Json(b): Json<FolderStackReq>) 
         for (_, path) in &files {
             if cancel.load(Ordering::SeqCst) {
                 break;
+            }
+            // 선형 RAW 경로 (--features raw). ARW만, 감마 전 f32로 누적 → 고SNR.
+            #[cfg(feature = "raw")]
+            if linear {
+                let is_arw = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.eq_ignore_ascii_case("arw"))
+                    .unwrap_or(false);
+                if is_arw {
+                    if let Some((rgb, w, h)) =
+                        path.to_str().and_then(stacker::decode_raw_linear)
+                    {
+                        match dims {
+                            None => {
+                                dims = Some((w, h));
+                                stk = Some(stacker::Stacker::new_linear(w, h, mode));
+                            }
+                            Some((sw, sh)) if sw == w && sh == h => {}
+                            Some(_) => continue,
+                        }
+                        if stk.as_mut().unwrap().add_linear(&rgb) {
+                            count.store(stk.as_ref().unwrap().count(), Ordering::SeqCst);
+                        }
+                    }
+                }
+                continue; // 선형 모드에선 8bit 경로 건너뜀
             }
             let bytes = match std::fs::read(path) {
                 Ok(b) => b,

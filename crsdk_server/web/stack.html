@@ -97,6 +97,9 @@
       <option value="0.5">Best 50%</option>
       <option value="0.25">Best 25%</option>
     </select>
+    <label style="color:var(--fg-dim);font-size:12px;display:flex;align-items:center;gap:4px;" title="Stack RAW (.arw) in linear light before gamma — higher SNR. Requires a build with --features raw.">
+      <input type="checkbox" id="linear"> 16-bit RAW
+    </label>
     <button class="nav" id="folderBtn" type="button" title="Stack the most recent captures at full resolution (JPEG; ARW uses its embedded preview)">Post-stack saved ▶</button>
   </div>
   <div class="hint">
@@ -166,14 +169,15 @@
   });
 
   // 저장 프레임 풀해상도 포스트스택 (라이브뷰보다 고화질). 진행은 status/preview 폴링으로.
-  const folderBtn = $('#folderBtn'), limitEl = $('#limit'), dirEl = $('#dir'), bestEl = $('#best');
+  const folderBtn = $('#folderBtn'), limitEl = $('#limit'), dirEl = $('#dir'), bestEl = $('#best'), linEl = $('#linear');
   folderBtn.addEventListener('click', async () => {
     if (running) return;
     try {
       const r = await fetch('/api/stack/folder', {
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({ mode: modeSel.value, limit: parseInt(limitEl.value,10) || 30,
-          dir: dirEl.value.trim() || undefined, best: bestEl.value ? parseFloat(bestEl.value) : undefined }) });
+          dir: dirEl.value.trim() || undefined, best: bestEl.value ? parseFloat(bestEl.value) : undefined,
+          linear: linEl.checked || undefined }) });
       if (!r.ok) { toast('Post-stack: ' + (await r.text())); return; }
       toast('Post-stacking saved frames…'); setUI(true);
     } catch (e) { toast('Post-stack 실패'); }

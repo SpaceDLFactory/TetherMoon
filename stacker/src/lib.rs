@@ -36,7 +36,7 @@ pub fn luma_from_rgb(rgb: &[u8], w: usize, h: usize) -> Vec<f32> {
 /// sRGB8(RGB). 반해상도(w/2 × h/2). 임베디드 JPEG과 달리 센서 전체 데이터에서 직접 현상해
 /// 재압축 손실이 없다. `raw` feature 전용. 실패 시 None.
 #[cfg(feature = "raw")]
-pub fn decode_raw_rgb8(path: &str) -> Option<(Vec<u8>, usize, usize)> {
+pub fn decode_raw_linear(path: &str) -> Option<(Vec<f32>, usize, usize)> {
     let img = rawler::decode_file(path).ok()?;
     let (w, h) = (img.width, img.height);
     let raw = match &img.data {
@@ -57,9 +57,8 @@ pub fn decode_raw_rgb8(path: &str) -> Option<(Vec<u8>, usize, usize)> {
     let wb = img.wb_coeffs;
     let wg = if wb[1] > 0.0 { wb[1] } else { 1.0 };
     let (wr, wbb) = (wb[0] / wg, wb[2] / wg);
-    let gamma = 1.0f32 / 2.2;
     let (ow, oh) = (w / 2, h / 2);
-    let mut out = vec![0u8; ow * oh * 3];
+    let mut out = vec![0f32; ow * oh * 3];
     for by in 0..oh {
         for bx in 0..ow {
             let (x, y) = (bx * 2, by * 2);
@@ -79,16 +78,22 @@ pub fn decode_raw_rgb8(path: &str) -> Option<(Vec<u8>, usize, usize)> {
                     cnt[c] += 1.0;
                 }
             }
-            let r = (acc[0] / cnt[0].max(1.0) * wr).clamp(0.0, 1.0);
-            let g = (acc[1] / cnt[1].max(1.0)).clamp(0.0, 1.0);
-            let b = (acc[2] / cnt[2].max(1.0) * wbb).clamp(0.0, 1.0);
             let di = (by * ow + bx) * 3;
-            out[di] = (r.powf(gamma) * 255.0) as u8;
-            out[di + 1] = (g.powf(gamma) * 255.0) as u8;
-            out[di + 2] = (b.powf(gamma) * 255.0) as u8;
+            out[di] = (acc[0] / cnt[0].max(1.0) * wr).clamp(0.0, 1.0);
+            out[di + 1] = (acc[1] / cnt[1].max(1.0)).clamp(0.0, 1.0);
+            out[di + 2] = (acc[2] / cnt[2].max(1.0) * wbb).clamp(0.0, 1.0);
         }
     }
     Some((out, ow, oh))
+}
+
+/// decode_raw_linear에 감마(1/2.2) + 8bit 적용한 sRGB8 버전(반해상도).
+#[cfg(feature = "raw")]
+pub fn decode_raw_rgb8(path: &str) -> Option<(Vec<u8>, usize, usize)> {
+    let (lin, w, h) = decode_raw_linear(path)?;
+    let gamma = 1.0f32 / 2.2;
+    let out = lin.iter().map(|&v| (v.powf(gamma) * 255.0) as u8).collect();
+    Some((out, w, h))
 }
 
 /// 프레임 전체 선명도 = 라플라시안 응답의 분산(값 클수록 선명). 성능 위해 2px 서브샘플.
@@ -395,6 +400,16 @@ pub fn estimate_rigid(reference: &[Star], cur: &[Star], tol: f32) -> Option<Rigi
 }
 
 /// 정렬 누적기. 첫 프레임을 기준으로 삼고 이후 프레임을 정합해 float 누적한다.
+/// RGB f32 → luma f32.
+fn luma_f32(rgb: &[f32], w: usize, h: usize) -> Vec<f32> {
+    let mut out = vec![0f32; w * h];
+    for i in 0..w * h {
+        let j = i * 3;
+        out[i] = 0.299 * rgb[j] + 0.587 * rgb[j + 1] + 0.114 * rgb[j + 2];
+    }
+    out
+}
+
 pub struct Stacker {
     w: usize,
     h: usize,
@@ -403,10 +418,21 @@ pub struct Stacker {
     wt: Vec<f32>,  // average용 픽셀별 기여수
     reference: Option<Vec<Star>>,
     count: u32,
+    linear: bool, // true면 입력이 선형광(f32), 렌더 시 감마 적용
 }
 
 impl Stacker {
     pub fn new(w: usize, h: usize, mode: Mode) -> Self {
+        Self::make(w, h, mode, false)
+    }
+
+    /// 선형광(f32, 0..1) 프레임용 — RAW 디코드(감마 전)를 넣어 선형에서 평균/누적하고
+    /// 렌더 시 감마 적용. 8bit 감마 프레임보다 SNR·비트뎁스 유리.
+    pub fn new_linear(w: usize, h: usize, mode: Mode) -> Self {
+        Self::make(w, h, mode, true)
+    }
+
+    fn make(w: usize, h: usize, mode: Mode, linear: bool) -> Self {
         Self {
             w,
             h,
@@ -415,6 +441,7 @@ impl Stacker {
             wt: vec![0.0; w * h],
             reference: None,
             count: 0,
+            linear,
         }
     }
 
@@ -422,14 +449,27 @@ impl Stacker {
         self.count
     }
 
-    /// RGB8 한 장 추가. 첫 장은 기준(정렬 없이 누적). 이후 장은 기준에 정합, 실패 시
-    /// 프레임을 기각하고 false(누적 안 함). 성공 시 true.
+    /// RGB8 한 장 추가(감마 도메인). 첫 장은 기준, 이후 장은 정합. 실패 시 기각(false).
     pub fn add(&mut self, rgb: &[u8]) -> bool {
         if rgb.len() < self.w * self.h * 3 {
             return false;
         }
-        let luma = luma_from_rgb(rgb, self.w, self.h);
-        let stars = detect_stars(&luma, self.w, self.h, 16, 8.0);
+        let rgbf: Vec<f32> = rgb.iter().map(|&v| v as f32).collect();
+        let luma = luma_f32(&rgbf, self.w, self.h);
+        self.add_common(&rgbf, &luma)
+    }
+
+    /// 선형광 RGB(f32, 0..1) 한 장 추가. new_linear로 만든 누적기에 쓴다.
+    pub fn add_linear(&mut self, rgb: &[f32]) -> bool {
+        if rgb.len() < self.w * self.h * 3 {
+            return false;
+        }
+        let luma = luma_f32(rgb, self.w, self.h);
+        self.add_common(rgb, &luma)
+    }
+
+    fn add_common(&mut self, rgb: &[f32], luma: &[f32]) -> bool {
+        let stars = detect_stars(luma, self.w, self.h, 16, 8.0);
         let tf = match &self.reference {
             Some(ref_stars) => match estimate_rigid(ref_stars, &stars, 6.0) {
                 Some(t) => t,
@@ -449,7 +489,7 @@ impl Stacker {
     }
 
     // 출력(기준좌표) 픽셀 (x,y) ← cur 좌표 tf.apply(x,y)를 bilinear 샘플. (cur ≈ R·ref + t.)
-    fn accumulate(&mut self, rgb: &[u8], tf: Rigid) {
+    fn accumulate(&mut self, rgb: &[f32], tf: Rigid) {
         let (w, h) = (self.w, self.h);
         for y in 0..h {
             for x in 0..w {
@@ -465,10 +505,10 @@ impl Stacker {
                 let fy = sy - y0 as f32;
                 let di = (y * w + x) * 3;
                 for c in 0..3 {
-                    let p00 = rgb[(y0 * w + x0) * 3 + c] as f32;
-                    let p10 = rgb[(y0 * w + x1) * 3 + c] as f32;
-                    let p01 = rgb[(y1 * w + x0) * 3 + c] as f32;
-                    let p11 = rgb[(y1 * w + x1) * 3 + c] as f32;
+                    let p00 = rgb[(y0 * w + x0) * 3 + c];
+                    let p10 = rgb[(y0 * w + x1) * 3 + c];
+                    let p01 = rgb[(y1 * w + x0) * 3 + c];
+                    let p11 = rgb[(y1 * w + x1) * 3 + c];
                     let v = p00 * (1.0 - fx) * (1.0 - fy)
                         + p10 * fx * (1.0 - fy)
                         + p01 * (1.0 - fx) * fy
@@ -489,23 +529,24 @@ impl Stacker {
         }
     }
 
-    /// 현재 스택본을 RGB8로 렌더.
+    /// 현재 스택본을 RGB8로 렌더. linear면 감마(1/2.2) 적용, 아니면 8bit 도메인 그대로.
     pub fn render(&self) -> Vec<u8> {
         let mut out = vec![0u8; self.w * self.h * 3];
+        let gamma = 1.0f32 / 2.2;
         for i in 0..self.w * self.h {
             let di = i * 3;
-            match self.mode {
-                Mode::Average => {
-                    let wt = self.wt[i].max(1.0);
-                    for c in 0..3 {
-                        out[di + c] = (self.buf[di + c] / wt).round().clamp(0.0, 255.0) as u8;
-                    }
-                }
-                Mode::Lighten => {
-                    for c in 0..3 {
-                        out[di + c] = self.buf[di + c].clamp(0.0, 255.0) as u8;
-                    }
-                }
+            let wt = if self.mode == Mode::Average {
+                self.wt[i].max(1.0)
+            } else {
+                1.0
+            };
+            for c in 0..3 {
+                let v = self.buf[di + c] / wt;
+                out[di + c] = if self.linear {
+                    (v.clamp(0.0, 1.0).powf(gamma) * 255.0).round().clamp(0.0, 255.0) as u8
+                } else {
+                    v.round().clamp(0.0, 255.0) as u8
+                };
             }
         }
         out
@@ -594,6 +635,42 @@ mod tests {
         let mut st = Stacker::new(64, 48, Mode::Average);
         assert!(!st.add(&blank), "별 없는 프레임은 기준으로 시작 안 함");
         assert_eq!(st.count(), 0);
+    }
+
+    #[test]
+    fn linear_stack_aligns_and_gammas() {
+        // 선형광 프레임(배경 0.02, 별 0.9). new_linear로 정합 평균 → 렌더는 감마 적용.
+        let mk = |pts: &[(usize, usize)]| {
+            let (w, h) = (48usize, 48usize);
+            let mut f = vec![0.02f32; w * h * 3];
+            for &(sx, sy) in pts {
+                for dy in -1i32..=1 {
+                    for dx in -1i32..=1 {
+                        let x = sx as i32 + dx;
+                        let y = sy as i32 + dy;
+                        if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
+                            let i = ((y as usize) * w + x as usize) * 3;
+                            f[i] = 0.9;
+                            f[i + 1] = 0.9;
+                            f[i + 2] = 0.9;
+                        }
+                    }
+                }
+            }
+            f
+        };
+        let a = mk(&[(12, 12), (30, 20), (20, 35)]);
+        let b = mk(&[(14, 10), (32, 18), (22, 33)]); // +(2,-2)
+        let mut st = Stacker::new_linear(48, 48, Mode::Average);
+        assert!(st.add_linear(&a));
+        assert!(st.add_linear(&b), "선형 이동 정합");
+        assert_eq!(st.count(), 2);
+        let out = st.render();
+        let at = |x: usize, y: usize| out[(y * 48 + x) * 3] as i32;
+        assert!(at(12, 12) > 230, "star {}", at(12, 12));
+        // 감마로 어두운 배경(0.02)이 들려야: 선형이면 ~5, 감마면 ~42.
+        let bg = at(0, 0);
+        assert!(bg > 25 && bg < 60, "gamma-lifted bg {}", bg);
     }
 
     #[test]
