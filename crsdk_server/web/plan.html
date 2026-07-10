@@ -47,6 +47,8 @@
   .card .ca .u{font-size:14px;font-weight:600;color:var(--fg-dim);}
   .card .cd{color:var(--fg-dim);font-size:13px;margin-top:1px;}
   .card.lowc .ca{color:var(--warn);}
+  .card.shoot{cursor:pointer;} .card.shoot:hover{border-color:var(--accent);}
+  .card .go{color:var(--accent);font-size:13px;}
   .card .x{position:absolute;top:8px;right:10px;color:var(--fg-mute);cursor:pointer;font-size:13px;}
   .empty{padding:24px 14px;color:var(--fg-mute);text-align:center;}
   details>summary{padding:10px 12px;color:var(--fg-dim);font-size:13px;cursor:pointer;border-top:1px solid var(--border);}
@@ -56,6 +58,7 @@
 <body>
   <div class="topbar">
     <span class="title">TetherMoon · Plan 🔭</span>
+    <span id="cam" style="color:var(--fg-mute);font-size:12px;"></span>
     <span class="sp"></span>
     <button class="nav" id="nightBtn" type="button" title="야간 모드">🌙</button>
     <a class="nav" href="/web/index.html">← Console</a>
@@ -234,11 +237,18 @@
   function when(){ const dt=new Date(Date.now()+offsetH*3600e3); return dt; }
 
   function removeCustom(name){ custom=custom.filter(t=>t.name!==name); saveCustom(); render(); }
+  // 대상 → 촬영 프리셋 클래스. Sun은 태양필터 없이 위험 → 링크 안 함.
+  function classOf(name){
+    if(name==='Moon') return 'moon';
+    if(['Mercury','Venus','Mars','Jupiter','Saturn'].includes(name)) return 'planet';
+    if(name==='Sun') return null;
+    return 'dso'; // 사용자 추가(별·성운·은하)
+  }
   function card(r){
-    const low=r.alt<=25, isC=custom.some(t=>t.name===r.name);
-    return `<div class="card${low?' lowc':''}">`+
+    const low=r.alt<=25, isC=custom.some(t=>t.name===r.name), cls=classOf(r.name);
+    return `<div class="card${low?' lowc':''}${cls?' shoot':''}"${cls?` data-cls="${cls}" data-name="${r.name}"`:''}>`+
       (isC?`<span class="x" data-n="${r.name}" title="remove">✕</span>`:'')+
-      `<div class="cn">${r.name}</div>`+
+      `<div class="cn">${r.name}${cls?' <span class="go">▸ shoot</span>':''}</div>`+
       `<div class="ca">${r.alt.toFixed(0)}<span class="u">° alt</span></div>`+
       `<div class="cd">${compass(r.az)} · ${r.az.toFixed(0)}°</div></div>`;
   }
@@ -259,7 +269,11 @@
     bestEl.innerHTML = best.length
       ? best.map(card).join('')
       : '<div class="empty">Nothing well placed right now — try +1h to move toward night.</div>';
-    bestEl.querySelectorAll('.x').forEach(x=>x.addEventListener('click',()=>removeCustom(x.dataset.n)));
+    bestEl.querySelectorAll('.x').forEach(x=>x.addEventListener('click',e=>{ e.stopPropagation(); removeCustom(x.dataset.n); }));
+    // 카드 클릭 → 콘솔로 이동, 촬영 프리셋 적용.
+    bestEl.querySelectorAll('.card.shoot').forEach(el=>el.addEventListener('click',()=>{
+      location.href='/web/index.html?shoot='+el.dataset.cls+'&name='+encodeURIComponent(el.dataset.name);
+    }));
     // 접힌 전체 목록.
     tb.innerHTML='';
     for(const r of rows){
@@ -305,6 +319,16 @@
   applyNight(localStorage.getItem('night')==='1');
   nightBtn.addEventListener('click',()=>{ const on=!document.body.classList.contains('night');
     applyNight(on); localStorage.setItem('night',on?'1':'0'); });
+
+  // 카메라 상태 칩 (콘솔과 동일 서버 폴링)
+  const camEl=$('#cam');
+  async function pollCam(){
+    try{ const st=await(await fetch('/api/status',{cache:'no-store'})).json();
+      if(st.state==='connected'){ camEl.textContent='● '+st.model; camEl.style.color='var(--good)'; }
+      else { camEl.textContent='○ camera off'; camEl.style.color='var(--fg-mute)'; }
+    }catch(e){ camEl.textContent=''; }
+  }
+  pollCam(); setInterval(pollCam,3000);
 
   // 초기화
   $('#lat').value=localStorage.getItem('plan_lat')||'';

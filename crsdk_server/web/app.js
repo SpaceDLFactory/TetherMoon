@@ -372,6 +372,39 @@
   const selFlash    = document.getElementById('selFlash');
   const selShutterType = document.getElementById('selShutterType');
   const selSilent   = document.getElementById('selSilent');
+
+  // ── Plan 탭에서 넘어온 촬영 프리셋 (?shoot=class&name=) ──────────────────
+  (function(){
+    const q=new URLSearchParams(location.search);
+    const cls=q.get('shoot'); if(!cls) return;
+    const name=q.get('name')||cls;
+    const PRE={
+      moon:  {iso:100, sh:1/250, ap:8,   note:'Bright — no tracking needed'},
+      planet:{iso:400, sh:1/60,  ap:8,   note:'Small & bright — try Stack ▸ Best % (lucky imaging)'},
+      dso:   {iso:1600,sh:20,    ap:2.8, note:'Deep-sky — needs a tracker; stack many frames'},
+    };
+    const p=PRE[cls]||PRE.dso;
+    const shLabel = p.sh<1 ? '1/'+Math.round(1/p.sh) : p.sh+'"';
+    const banner=document.getElementById('shootBanner');
+    document.getElementById('shootMsg').innerHTML=`🎯 <b>${name}</b> preset — ISO ${p.iso} · ${shLabel} · f/${p.ap}. <span style="color:#9aa0ad">${p.note}</span>`;
+    banner.style.display='flex';
+    const shSec=lbl=>{ if(/bulb/i.test(lbl))return null; if(lbl.includes('/')){const d=parseFloat(lbl.split('/')[1]);return d?1/d:null;} const n=parseFloat(lbl); return isFinite(n)?n:null; };
+    const nearest=(sel,target,parse)=>{
+      let best=null,bd=Infinity;
+      for(const o of sel.options){ const v=parse(o.textContent.trim()); if(v==null)continue; const d=Math.abs(v-target); if(d<bd){bd=d;best=o;} }
+      if(best){ sel.value=best.value; sel.dispatchEvent(new Event('change')); return true; } return false;
+    };
+    document.getElementById('shootApply').addEventListener('click',()=>{
+      const ok=[
+        nearest(selIso,p.iso,l=>{const n=parseInt(l,10);return isFinite(n)?n:null;}),
+        nearest(selShutter,p.sh,shSec),
+        nearest(selAperture,p.ap,l=>{const n=parseFloat(l);return isFinite(n)?n:null;}),
+      ].some(Boolean);
+      toast(ok?('Applied '+name+' preset'):'Connect the camera first', ok?'ok':'err');
+      banner.style.display='none';
+    });
+    document.getElementById('shootClose').addEventListener('click',()=>{ banner.style.display='none'; history.replaceState(null,'','/web/index.html'); });
+  })();
   const selFileType = document.getElementById('selFileType');
   const selJpegQuality   = document.getElementById('selJpegQuality');
   const selPicProfile    = document.getElementById('selPicProfile');

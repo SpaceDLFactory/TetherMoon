@@ -63,6 +63,7 @@
 <body>
   <div class="topbar">
     <span class="title">TetherMoon · Live Stack 🌙</span>
+    <span id="cam" style="color:var(--fg-mute);font-size:12px;"></span>
     <span class="count" id="count"></span>
     <span class="sp"></span>
     <button class="nav" id="nightBtn" type="button" title="야간 모드">🌙</button>
@@ -186,6 +187,16 @@
     const on = !document.body.classList.contains('night');
     applyNight(on); localStorage.setItem('night', on ? '1' : '0');
   });
+
+  // 카메라 상태 칩
+  const camEl=$('#cam');
+  async function pollCam(){
+    try{ const st=await(await fetch('/api/status',{cache:'no-store'})).json();
+      if(st.state==='connected'){ camEl.textContent='● '+st.model; camEl.style.color='var(--good)'; }
+      else { camEl.textContent='○ camera off'; camEl.style.color='var(--fg-mute)'; }
+    }catch(e){ camEl.textContent=''; }
+  }
+  pollCam(); setInterval(pollCam,3000);
 
   tick();
 </script>
