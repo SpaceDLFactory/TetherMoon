@@ -115,10 +115,12 @@ The rest of this README is for **building from source**.
 - **RAW previews** — `.arw` shots preview by extracting the embedded JPEG
 - **Live stacking** *(Stack tab)* — star-align and accumulate frames to build SNR
   (Average) or bright detail (Lighten), live from the view or as a full-resolution
-  post-stack of saved frames, with **lucky imaging** (keep only the sharpest %) and
-  three **alignment modes** — Stars (deep-sky), Centroid (moon/planets), or ROI
-  (drag a box to lock onto a feature). True **RAW stacking** (rawler demosaic +
-  16-bit linear accumulation) is available in a `--features raw` build
+  post-stack of saved frames, with **lucky imaging** (keep only the sharpest %),
+  **sigma-clip** (reject per-pixel outliers — satellite/plane trails, cosmic rays —
+  instead of a plain average), and three **alignment modes** — Stars (deep-sky),
+  Centroid (moon/planets), or ROI (drag a box to lock onto a feature). True **RAW
+  stacking** (rawler demosaic + 16-bit linear accumulation) is available in a
+  `--features raw` build
 - **Shooting plan** *(Plan tab)* — enter your location (or device GPS) and see which
   targets are up and how high right now; Sun/Moon/planets plus a catalog of bright
   stars and deep-sky objects, custom targets, and a "shoot this" preset hand-off
