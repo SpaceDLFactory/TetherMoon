@@ -106,6 +106,13 @@
     <label style="color:var(--fg-dim);font-size:12px;display:flex;align-items:center;gap:4px;" title="Stack RAW (.arw) in linear light before gamma — higher SNR. Requires a build with --features raw.">
       <input type="checkbox" id="linear"> 16-bit RAW
     </label>
+    <select id="sigma" title="Sigma-clip: reject per-pixel outliers (satellite/plane trails, cosmic rays) instead of a plain average. Post-stack only."
+            style="background:var(--bg-3);color:var(--fg);border:1px solid var(--border);border-radius:8px;padding:8px;">
+      <option value="">No clip</option>
+      <option value="3">σ-clip 3.0</option>
+      <option value="2.5">σ-clip 2.5</option>
+      <option value="2">σ-clip 2.0</option>
+    </select>
     <button class="nav" id="folderBtn" type="button" title="Stack the most recent captures at full resolution (JPEG; ARW uses its embedded preview)">Post-stack saved ▶</button>
   </div>
   <div class="hint">
@@ -209,7 +216,9 @@
   });
 
   // 저장 프레임 풀해상도 포스트스택 (라이브뷰보다 고화질). 진행은 status/preview 폴링으로.
-  const folderBtn = $('#folderBtn'), limitEl = $('#limit'), dirEl = $('#dir'), bestEl = $('#best'), linEl = $('#linear');
+  const folderBtn = $('#folderBtn'), limitEl = $('#limit'), dirEl = $('#dir'), bestEl = $('#best'), linEl = $('#linear'), sigEl = $('#sigma');
+  // sigma-clip은 8bit 경로 전용(서버가 조기 return) → 켜지면 16-bit RAW 무의미하니 상호배타로 명시.
+  sigEl.addEventListener('change', () => { if (sigEl.value) { linEl.checked = false; linEl.disabled = true; } else linEl.disabled = false; });
   folderBtn.addEventListener('click', async () => {
     if (running) return;
     try {
@@ -217,7 +226,7 @@
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({ mode: modeSel.value, limit: parseInt(limitEl.value,10) || 30,
           dir: dirEl.value.trim() || undefined, best: bestEl.value ? parseFloat(bestEl.value) : undefined,
-          linear: linEl.checked || undefined, ...alignBody() }) });
+          linear: linEl.checked || undefined, sigma: sigEl.value ? parseFloat(sigEl.value) : undefined, ...alignBody() }) });
       if (!r.ok) { toast('Post-stack: ' + (await r.text())); return; }
       toast('Post-stacking saved frames…'); setUI(true);
     } catch (e) { toast('Post-stack 실패'); }
