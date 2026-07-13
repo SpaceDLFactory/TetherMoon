@@ -8,6 +8,11 @@
 > set "LIBCLANG_PATH=F:\LLVM\bin"   # 따옴표 필수 — trailing space 들어가면 bindgen이 못 찾음
 > cargo build -p crsdk_server
 > ```
+>
+> **2026-07-13 재검증(원격 SSH)**: 같은 박스에서 최신 `main`(sigma-clip 포함) 풀 → release 빌드 통과,
+> `stacker` 14/14 통과, exe 부팅·`0.0.0.0:8080` 리슨 확인, `package-win.ps1`로 `dist\TetherMoon-win-x64.zip`(9.5MB, 29 엔트리, `web\stack.html`에 sigma UI 포함) 재생성.
+> 이때 시스템 LLVM이 없어 `pip install libclang`로 libclang 조달(§1.3). 빌드 의존성 실측 set:
+> Rust 1.96.0 msvc · VS BuildTools `F:\BuildTools`(VC143.CRT 14.44) · libclang(pip, Python37) · `CrSDK_Win/`(vendored, gitignore).
 
 ## 0. 시작 방법
 ```
@@ -22,6 +27,9 @@ git checkout windows-prep
 1. [ ] **Rust** — rustup, 기본 타깃 `stable-x86_64-pc-windows-msvc` (`rustup default stable-msvc`)
 2. [ ] **Visual Studio Build Tools** — "Desktop development with C++" (MSVC + Windows SDK). `cc`/링크 필수
 3. [ ] **LLVM (clang/libclang)** — bindgen용. `LIBCLANG_PATH` 환경변수 (예: `C:\Program Files\LLVM\bin`)
+   - **전체 LLVM 설치가 없어도 됨**: `pip install libclang` 이 `libclang.dll` 하나만 떨군다(관리자 불필요).
+     경로 `<python>\Lib\site-packages\clang\native\libclang.dll` → `LIBCLANG_PATH`를 그 `native` 폴더로.
+     bindgen 0.69은 이 wheel의 libclang로 정상 동작(2026-07-13 실측).
 4. [ ] **Windows용 Sony CrSDK** — Developer World에서 다운로드, 압축 해제
 5. [ ] **Git**
 6. [ ] 카메라 A7C USB 연결 (+ 필요 시 드라이버 — §2.4)
