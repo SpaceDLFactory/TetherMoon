@@ -123,13 +123,14 @@ pub(crate) struct BulbReq { seconds: u64 }
 pub(crate) async fn bulb(State(s): State<AppState>, Json(b): Json<BulbReq>) -> impl IntoResponse {
     use std::sync::atomic::Ordering;
     let secs = b.seconds.clamp(1, 900); // 1초~15분
-    let handle = {
+    let (handle, model) = {
         let g = s.camera.lock().await;
         match &*g {
-            Some(c) => c.0.device_handle(),
+            Some(c) => (c.0.device_handle(), c.1.clone()),
             None => return (StatusCode::SERVICE_UNAVAILABLE, "not connected".to_string()),
         }
     };
+    let bulb_enc = crsdk::body::BodyProfile::for_model(&model).bulb;
     // 중복 트리거 방지: false→true 교체에 성공한 호출만 진행.
     if s.bulb_active
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -139,9 +140,13 @@ pub(crate) async fn bulb(State(s): State<AppState>, Json(b): Json<BulbReq>) -> i
     }
     let active = s.bulb_active.clone();
     tokio::spawn(async move {
-        // 셔터를 BULB(0)로 보장한 뒤 노출 시작.
+        // 바디 프로필의 BULB 인코딩으로 노출 시작.
         let start = tokio::task::spawn_blocking(move || {
-            crsdk::properties::set(handle, crsdk::properties::code::SHUTTER_SPEED, 0)?;
+            match bulb_enc {
+                crsdk::body::BulbEncoding::ShutterZero => {
+                    crsdk::properties::set(handle, crsdk::properties::code::SHUTTER_SPEED, 0)?;
+                }
+            }
             crsdk::shutter::shutter_down(handle)
         })
         .await;

@@ -6,6 +6,7 @@ pub mod connection;
 pub mod liveview;
 pub mod shutter;
 pub mod properties;
+pub mod body;
 pub mod capability;
 pub mod control;
 pub(crate) mod ffi;
