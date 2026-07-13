@@ -16,14 +16,16 @@ use std::time::Duration;
 
 
 use axum::{
+    extract::Path,
+    http::{header, StatusCode},
     response::{
-        Json, Redirect,
+        IntoResponse, Json, Redirect, Response,
     },
     routing::{get, post},
     Router,
 };
+use rust_embed::Embed;
 use tokio::sync::{broadcast, Mutex};
-use tower_http::services::ServeDir;
 
 mod autofocus; // SW-AF: 라이브뷰 프레임 선명도 측정
 mod composite; // 다중노출/스태킹: JPEG N장 → 1장 합성
@@ -46,20 +48,31 @@ async fn root() -> Redirect {
     Redirect::to("/web/index.html")
 }
 
-/// UI 정적파일 디렉토리. 우선순위: ① 실행파일 옆 `web/`(폴더형 배포) →
-/// ② `../Resources/web`(.app 번들: Contents/MacOS/ → Contents/Resources/web) →
-/// ③ 빌드 디렉토리의 `web/`(개발).
-fn web_dir() -> std::path::PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            for cand in [dir.join("web"), dir.join("../Resources/web")] {
-                if cand.is_dir() {
-                    return cand;
-                }
-            }
+/// UI 정적파일을 exe에 임베드(단일 바이너리 배포 — 옆에 `web/` 폴더 불필요).
+/// 개발 빌드도 컴파일 타임에 `crsdk_server/web/`를 가져오므로 동작 동일.
+#[derive(Embed)]
+#[folder = "web/"]
+#[exclude = ".omc/*"]
+struct WebAssets;
+
+/// `/web/<path>` — 임베드된 UI 파일 서빙. 확장자로 content-type 결정, 없으면 404.
+async fn serve_web(Path(path): Path<String>) -> Response {
+    match WebAssets::get(&path) {
+        Some(file) => {
+            let mime = match path.rsplit('.').next() {
+                Some("html") => "text/html; charset=utf-8",
+                Some("js") => "text/javascript; charset=utf-8",
+                Some("css") => "text/css; charset=utf-8",
+                Some("png") => "image/png",
+                Some("svg") => "image/svg+xml",
+                Some("ico") => "image/x-icon",
+                Some("json") => "application/json",
+                _ => "application/octet-stream",
+            };
+            ([(header::CONTENT_TYPE, mime)], file.data.into_owned()).into_response()
         }
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
-    std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/web"))
 }
 
 /// 맥의 LAN IPv4 (폰 접속용). UDP connect 트릭 — 실제 패킷은 보내지 않고
@@ -186,7 +199,7 @@ async fn main() {
         .route("/api/_debug/enum", get(debug_enum))
         .route("/events", get(events))
         .route("/lv", get(liveview))
-        .nest_service("/web", ServeDir::new(web_dir()));
+        .route("/web/*path", get(serve_web));
     #[cfg(feature = "detector")]
     let app = app.route("/api/detect", post(detect)); // RT-DETR 검출(추적AF, 옵셔널)
     let app = app.with_state(state);

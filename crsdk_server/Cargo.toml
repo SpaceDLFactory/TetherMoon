@@ -13,7 +13,7 @@ crsdk      = { path = ".." }
 axum       = "0.7"
 tokio      = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
-tower-http = { version = "0.5", features = ["fs", "trace"] }
+rust-embed = { version = "8", features = ["include-exclude"] }  # web/ UI를 exe에 임베드(단일 바이너리 배포 — web\ 폴더 불필요)
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing    = "0.1"
