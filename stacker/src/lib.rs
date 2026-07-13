@@ -520,6 +520,51 @@ fn luma_f32(rgb: &[f32], w: usize, h: usize) -> Vec<f32> {
     out
 }
 
+/// 한 픽셀의 여러 프레임 샘플에서 sigma-clip 평균을 낸다.
+///
+/// 목적: 평범한 평균은 위성/비행기 궤적·우주선(cosmic ray) 픽셀 하나에 끌려간다.
+/// sigma-clip은 평균±(sigma·표준편차) 밖의 샘플(=outlier)을 버리고 남은 것만 재평균한다.
+/// 이걸 `iters`번 반복하면(매번 mean/std 재계산) 강건해진다. 딥스카이 스택의 표준 기법.
+///
+/// 알고리즘(니가 채울 것):
+///   1. samples의 평균 mean, 표준편차 std 계산
+///   2. |x - mean| > sigma*std 인 x 제거
+///   3. 남은 것으로 1~2를 iters번 반복 (또는 제거될 게 없으면 조기 종료)
+///   4. 최종 남은 샘플의 평균 반환. 다 잘려 비면 원래 평균.
+///
+/// (Stacker `Mode::SigmaClip` 배선은 별도 설계: 픽셀별 전 프레임 샘플이 필요한데 현재 엔진은
+///  온라인 누적이라 프레임을 안 들고 있다. 전 프레임 보관 vs 2-pass(Welford 1패스 → 2패스 기각).)
+pub fn sigma_clip_mean(samples: &[f32], sigma: f32, iters: usize) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let full_mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
+    let mut inliers: Vec<f32> = samples.to_vec();
+    let mut mean = full_mean(&inliers);
+    for _ in 0..iters {
+        if inliers.len() <= 2 {
+            break; // 2개 이하면 std가 무의미 — 더 자르지 않는다
+        }
+        let n = inliers.len() as f32;
+        let var = inliers.iter().map(|x| (x - mean) * (x - mean)).sum::<f32>() / n;
+        let std = var.sqrt();
+        if std <= f32::EPSILON {
+            break; // 전부 동일 → 버릴 것 없음
+        }
+        let cut = sigma * std;
+        let before = inliers.len();
+        inliers.retain(|x| (x - mean).abs() <= cut);
+        if inliers.is_empty() {
+            return mean; // 다 잘리면 직전 평균
+        }
+        mean = full_mean(&inliers);
+        if inliers.len() == before {
+            break; // 이번 패스에 제거된 게 없으면 수렴
+        }
+    }
+    mean
+}
+
 pub struct Stacker {
     w: usize,
     h: usize,
@@ -893,6 +938,32 @@ mod tests {
         let out = st.render();
         // 기준 위치(30,30)의 밝은 특징이 정렬 평균 후에도 밝아야.
         assert!(out[(30 * w + 30) * 3] as i32 > 150, "aligned feature {}", out[(30 * w + 30) * 3]);
+    }
+
+    // ── sigma-clip 채점 테스트 (스텁이라 2개는 빨강 — 니가 채워 초록으로) ──
+    #[test]
+    fn sigma_clip_no_outliers_is_mean() {
+        // outlier 없으면 그냥 평균 (스텁도 통과 — 초록 출발점)
+        let s = [10.0, 11.0, 9.0, 10.5, 9.5];
+        let m = sigma_clip_mean(&s, 3.0, 3);
+        assert!((m - 10.0).abs() < 0.2, "clean mean {m}");
+    }
+
+    #[test]
+    fn sigma_clip_rejects_satellite() {
+        // 픽셀 대부분 ~10, 한 프레임에 위성이 지나가 250. sigma-clip은 250을 버려야.
+        // 스텁(평범한 평균)은 ~50으로 끌려가 실패한다 → 여기가 채울 지점.
+        let s = [10.0, 9.0, 11.0, 10.0, 250.0, 9.5, 10.5];
+        let m = sigma_clip_mean(&s, 2.0, 3);
+        assert!((m - 10.0).abs() < 1.5, "satellite not rejected: {m}");
+    }
+
+    #[test]
+    fn sigma_clip_rejects_both_tails() {
+        // 아래위 outlier 둘 다 기각 → inlier 평균.
+        let s = [100.0, 20.0, 21.0, 19.0, 20.0, 21.0, 300.0];
+        let m = sigma_clip_mean(&s, 2.0, 3);
+        assert!((m - 20.0).abs() < 1.5, "tails not rejected: {m}");
     }
 
     #[test]
