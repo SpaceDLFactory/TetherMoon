@@ -14,7 +14,7 @@ Star AF, focus meter, bracketing, live stacking, shooting plan) — see `STATUS.
 | Crate / dir | Role |
 |---|---|
 | `crsdk` (root, `src/`) | Safe Rust FFI wrapper lib (session/enumerate/connection/liveview/shutter/properties/callback) |
-| `crsdk_server/` | axum/tokio HTTP·SSE·MJPEG server + web UI. All SDK calls via `spawn_blocking` |
+| `crsdk_server/` | axum/tokio HTTP·SSE·MJPEG server + web UI. All SDK calls via `spawn_blocking`. Modules by domain: `state`(AppState/guards) · `lifecycle`(connect/shutdown/single-instance) · `props` · `swaf`(SW-AF/Star AF/focus meter) · `afpoint`(HW AF+calib) · `capture`(shutter/bulb/interval/bracket/multi-exp) · `stack` · `storage` · `stream`(lv producer/SSE); `main.rs` = router+startup only |
 | `stacker/` | Star-alignment + frame-stacking engine. Pure math, no camera dep, unit-tested |
 | `detector/` | RT-DETR CoreML object detection (tracking AF). Optional |
 | `crsdk_server/web/` | `index.html`(console) · `plan.html` · `stack.html` · `remote.html` + `app.js`, `styles.css` |
