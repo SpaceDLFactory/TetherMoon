@@ -60,7 +60,9 @@ impl UsbInterferenceSuppressor {
 
     #[cfg(not(target_os = "macos"))]
     pub(crate) fn start() -> Option<Self> {
-        None // TODO(windows): USB 드라이버/억제가 필요한지 실측 후 결정
+        // Windows엔 ptpcamerad가 없다(카메라는 libusbK 드라이버로 직접 잡음) → 억제 불필요.
+        // 실 A7C로 확인됨(README §Windows / docs/WINDOWS-PORT.md).
+        None
     }
 }
 
