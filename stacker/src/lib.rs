@@ -511,7 +511,7 @@ fn ncc_shift(
 }
 
 /// RGB f32 → luma f32.
-fn luma_f32(rgb: &[f32], w: usize, h: usize) -> Vec<f32> {
+pub fn luma_f32(rgb: &[f32], w: usize, h: usize) -> Vec<f32> {
     let mut out = vec![0f32; w * h];
     for i in 0..w * h {
         let j = i * 3;
@@ -565,16 +565,101 @@ pub fn sigma_clip_mean(samples: &[f32], sigma: f32, iters: usize) -> f32 {
     mean
 }
 
+/// tf 적용 좌표 (sx,sy)를 bilinear 샘플. 경계 밖이면 None. rgb는 f32 RGB(HWC).
+/// Stacker 내부 누적과 2-pass sigma stack이 공유하는 프리미티브.
+pub fn sample_bilinear(rgb: &[f32], w: usize, h: usize, sx: f32, sy: f32) -> Option<[f32; 3]> {
+    if sx < 0.0 || sy < 0.0 || sx > (w - 1) as f32 || sy > (h - 1) as f32 {
+        return None;
+    }
+    let x0 = sx.floor() as usize;
+    let y0 = sy.floor() as usize;
+    let x1 = (x0 + 1).min(w - 1);
+    let y1 = (y0 + 1).min(h - 1);
+    let fx = sx - x0 as f32;
+    let fy = sy - y0 as f32;
+    let mut out = [0f32; 3];
+    for c in 0..3 {
+        let p00 = rgb[(y0 * w + x0) * 3 + c];
+        let p10 = rgb[(y0 * w + x1) * 3 + c];
+        let p01 = rgb[(y1 * w + x0) * 3 + c];
+        let p11 = rgb[(y1 * w + x1) * 3 + c];
+        out[c] = p00 * (1.0 - fx) * (1.0 - fy)
+            + p10 * fx * (1.0 - fy)
+            + p01 * (1.0 - fx) * fy
+            + p11 * fx * fy;
+    }
+    Some(out)
+}
+
+/// 프레임 정렬기. 기준 프레임(첫 입력)을 잡고 이후 프레임의 정렬 변환(Rigid)을 낸다.
+/// Align 방식별 기준 상태를 들고 있다. Stacker가 내부로 쓰고, folder sigma-clip 2-pass도
+/// 이걸로 1패스에서 변환을 뽑아 2패스에 재사용한다.
+pub struct Aligner {
+    w: usize,
+    h: usize,
+    align: Align,
+    reference: Option<Vec<Star>>,     // Stars 기준 별 목록
+    ref_luma: Option<Vec<f32>>,       // Roi 기준 프레임 luma
+    ref_centroid: Option<(f32, f32)>, // Centroid 기준 무게중심
+}
+
+impl Aligner {
+    pub fn new(w: usize, h: usize, align: Align) -> Self {
+        Self { w, h, align, reference: None, ref_luma: None, ref_centroid: None }
+    }
+
+    /// 프레임 luma의 정렬 변환. 첫 호출은 기준을 잡고 Identity 반환. 정합 실패 시 None(기각).
+    pub fn transform(&mut self, luma: &[f32]) -> Option<Rigid> {
+        let (w, h) = (self.w, self.h);
+        match self.align {
+            Align::Stars => {
+                let stars = detect_stars(luma, w, h, 16, 8.0);
+                match &self.reference {
+                    Some(rs) => estimate_rigid(rs, &stars, 6.0),
+                    None => {
+                        if stars.len() < 3 {
+                            return None; // 기준에 별 3개 미만이면 시작 안 함
+                        }
+                        self.reference = Some(stars);
+                        Some(Rigid::identity())
+                    }
+                }
+            }
+            Align::Centroid => {
+                let c = centroid(luma, w, h)?;
+                match self.ref_centroid {
+                    Some(rc) => Some(Rigid { cos: 1.0, sin: 0.0, tx: c.0 - rc.0, ty: c.1 - rc.1 }),
+                    None => {
+                        self.ref_centroid = Some(c);
+                        Some(Rigid::identity())
+                    }
+                }
+            }
+            Align::Roi { cx, cy, half } => {
+                let px = (cx.clamp(0.0, 1.0) * w as f32) as usize;
+                let py = (cy.clamp(0.0, 1.0) * h as f32) as usize;
+                let hp = ((half * w as f32) as usize).clamp(6, 48);
+                let search = 24isize;
+                match &self.ref_luma {
+                    Some(rl) => ncc_shift(rl, luma, w, h, px, py, hp, search)
+                        .map(|(dx, dy)| Rigid { cos: 1.0, sin: 0.0, tx: dx, ty: dy }),
+                    None => {
+                        self.ref_luma = Some(luma.to_vec());
+                        Some(Rigid::identity())
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub struct Stacker {
     w: usize,
     h: usize,
     mode: Mode,
     buf: Vec<f32>, // RGB 누적 (average=합, lighten=픽셀별 최대)
     wt: Vec<f32>,  // average용 픽셀별 기여수
-    align: Align,
-    reference: Option<Vec<Star>>,     // Stars 기준 별 목록
-    ref_luma: Option<Vec<f32>>,       // Roi 기준 프레임 luma
-    ref_centroid: Option<(f32, f32)>, // Centroid 기준 무게중심
+    aligner: Aligner,
     count: u32,
     linear: bool, // true면 입력이 선형광(f32), 렌더 시 감마 적용
 }
@@ -592,7 +677,7 @@ impl Stacker {
 
     /// 정렬 방식 지정(기본 Stars). 첫 add 전에 호출. new(...).with_align(Align::Centroid) 식.
     pub fn with_align(mut self, align: Align) -> Self {
-        self.align = align;
+        self.aligner = Aligner::new(self.w, self.h, align);
         self
     }
 
@@ -603,10 +688,7 @@ impl Stacker {
             mode,
             buf: vec![0.0; w * h * 3],
             wt: vec![0.0; w * h],
-            align: Align::Stars,
-            reference: None,
-            ref_luma: None,
-            ref_centroid: None,
+            aligner: Aligner::new(w, h, Align::Stars),
             count: 0,
             linear,
         }
@@ -636,54 +718,9 @@ impl Stacker {
     }
 
     fn add_common(&mut self, rgb: &[f32], luma: &[f32]) -> bool {
-        let (w, h) = (self.w, self.h);
-        let tf = match self.align {
-            Align::Stars => {
-                let stars = detect_stars(luma, w, h, 16, 8.0);
-                match &self.reference {
-                    Some(rs) => match estimate_rigid(rs, &stars, 6.0) {
-                        Some(t) => t,
-                        None => return false, // 정합 실패 → 기각
-                    },
-                    None => {
-                        if stars.len() < 3 {
-                            return false; // 기준에 별 3개 미만이면 시작 안 함
-                        }
-                        self.reference = Some(stars);
-                        Rigid::identity()
-                    }
-                }
-            }
-            Align::Centroid => {
-                let c = match centroid(luma, w, h) {
-                    Some(c) => c,
-                    None => return false,
-                };
-                match self.ref_centroid {
-                    Some(rc) => Rigid { cos: 1.0, sin: 0.0, tx: c.0 - rc.0, ty: c.1 - rc.1 },
-                    None => {
-                        self.ref_centroid = Some(c);
-                        Rigid::identity()
-                    }
-                }
-            }
-            Align::Roi { cx, cy, half } => {
-                let px = (cx.clamp(0.0, 1.0) * w as f32) as usize;
-                let py = (cy.clamp(0.0, 1.0) * h as f32) as usize;
-                // 패치/탐색 크기는 성능 위해 캡(등록엔 작은 특징 패치로 충분).
-                let hp = ((half * w as f32) as usize).clamp(6, 48);
-                let search = 24isize;
-                match &self.ref_luma {
-                    Some(rl) => match ncc_shift(rl, luma, w, h, px, py, hp, search) {
-                        Some((dx, dy)) => Rigid { cos: 1.0, sin: 0.0, tx: dx, ty: dy },
-                        None => return false,
-                    },
-                    None => {
-                        self.ref_luma = Some(luma.to_vec());
-                        Rigid::identity()
-                    }
-                }
-            }
+        let tf = match self.aligner.transform(luma) {
+            Some(t) => t,
+            None => return false, // 정합 실패/별 부족 → 프레임 기각
         };
         self.accumulate(rgb, tf);
         self.count += 1;

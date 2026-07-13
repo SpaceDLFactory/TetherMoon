@@ -243,6 +243,7 @@ pub(crate) struct FolderStackReq {
     limit: Option<usize>,
     dir: Option<String>,  // 스택할 폴더(생략 시 저장 폴더)
     best: Option<f32>,    // lucky imaging: 선명한 상위 비율(0~1)만 스택. 생략=전부
+    sigma: Option<f32>,   // sigma-clip 스택: 픽셀별 평균±sigma·std 밖 기각(위성/우주선 제거). 8bit 경로 전용
     align: Option<String>, // "stars"(기본) | "centroid" | "roi"
     roi: Option<[f32; 3]>, // roi 모드용 [cx, cy, half] (0..1)
     #[cfg_attr(not(feature = "raw"), allow(dead_code))] // raw feature에서만 사용
@@ -276,6 +277,7 @@ pub(crate) async fn stack_folder(State(s): State<AppState>, Json(b): Json<Folder
     let limit = b.limit.unwrap_or(30).clamp(2, 200);
     let best = b.best;
     let al = parse_align(b.align.as_deref(), b.roi);
+    let sigma = b.sigma.filter(|s| *s > 0.0);
     #[cfg(feature = "raw")]
     let linear = b.linear.unwrap_or(false);
     s.stack_count.store(0, Ordering::SeqCst);
@@ -328,6 +330,114 @@ pub(crate) async fn stack_folder(State(s): State<AppState>, Json(b): Json<Folder
             }
             _ => files.reverse(), // 일반: 오래된→최신 (첫 장이 정렬 기준)
         }
+        // ── sigma-clip 2-pass (8bit 경로 전용). 픽셀별 평균±sigma·std 밖 기각으로
+        //    위성/비행기/우주선 제거. 라이브와 달리 파일이라 두 번 읽을 수 있다.
+        //    1패스: 정렬+Welford(mean/M2)·변환 저장. 2패스: 저장 변환으로 정렬해 기각·재합산. ──
+        if let Some(sg) = sigma {
+            let paths: Vec<_> = files.iter().map(|(_, p)| p.clone()).collect();
+            let decode = |p: &std::path::Path| -> Option<(Vec<f32>, usize, usize)> {
+                let bytes = std::fs::read(p).ok()?;
+                let (rgb, w, h) = decode_to_rgb8(p, &bytes)?;
+                Some((rgb.iter().map(|&v| v as f32).collect(), w, h))
+            };
+            let (mut dims, mut aligner) = (None, None);
+            let (mut mean, mut m2, mut cnt): (Vec<f32>, Vec<f32>, Vec<f32>) =
+                (Vec::new(), Vec::new(), Vec::new());
+            let mut xforms: Vec<(stacker::Rigid, std::path::PathBuf)> = Vec::new();
+            // 1패스
+            for p in &paths {
+                if cancel.load(Ordering::SeqCst) {
+                    break;
+                }
+                let (rgb, w, h) = match decode(p) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                match dims {
+                    None => {
+                        dims = Some((w, h));
+                        aligner = Some(stacker::Aligner::new(w, h, al));
+                        mean = vec![0.0; w * h * 3];
+                        m2 = vec![0.0; w * h * 3];
+                        cnt = vec![0.0; w * h];
+                    }
+                    Some((sw, sh)) if sw == w && sh == h => {}
+                    Some(_) => continue,
+                }
+                let luma = stacker::luma_f32(&rgb, w, h);
+                let tf = match aligner.as_mut().unwrap().transform(&luma) {
+                    Some(t) => t,
+                    None => continue,
+                };
+                for y in 0..h {
+                    for x in 0..w {
+                        let (sx, sy) = tf.apply(x as f32, y as f32);
+                        if let Some(px) = stacker::sample_bilinear(&rgb, w, h, sx, sy) {
+                            let pi = y * w + x;
+                            let n = cnt[pi] + 1.0;
+                            for c in 0..3 {
+                                let d = px[c] - mean[pi * 3 + c];
+                                mean[pi * 3 + c] += d / n;
+                                m2[pi * 3 + c] += d * (px[c] - mean[pi * 3 + c]);
+                            }
+                            cnt[pi] = n;
+                        }
+                    }
+                }
+                xforms.push((tf, p.clone()));
+                count.store(xforms.len() as u32, Ordering::SeqCst);
+            }
+            let (w, h) = match dims {
+                Some(d) => d,
+                None => return,
+            };
+            // 2패스: 기각·재합산
+            let mut sum = vec![0.0f32; w * h * 3];
+            let mut kept = vec![0.0f32; w * h * 3];
+            for (tf, p) in &xforms {
+                if cancel.load(Ordering::SeqCst) {
+                    break;
+                }
+                let (rgb, dw, dh) = match decode(p) {
+                    Some(v) if v.1 == w && v.2 == h => v,
+                    _ => continue,
+                };
+                let _ = (dw, dh);
+                for y in 0..h {
+                    for x in 0..w {
+                        let (sx, sy) = tf.apply(x as f32, y as f32);
+                        if let Some(px) = stacker::sample_bilinear(&rgb, w, h, sx, sy) {
+                            let pi = y * w + x;
+                            for c in 0..3 {
+                                let idx = pi * 3 + c;
+                                let var = if cnt[pi] > 1.0 { m2[idx] / cnt[pi] } else { 0.0 };
+                                let std = var.sqrt();
+                                if cnt[pi] < 2.0 || (px[c] - mean[idx]).abs() <= sg * std + 1e-3 {
+                                    sum[idx] += px[c];
+                                    kept[idx] += 1.0;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // 렌더: inlier 평균(없으면 Welford 평균 폴백) → 8bit
+            let mut out = vec![0u8; w * h * 3];
+            for i in 0..w * h * 3 {
+                let v = if kept[i] > 0.0 { sum[i] / kept[i] } else { mean[i] };
+                out[i] = v.round().clamp(0.0, 255.0) as u8;
+            }
+            let mut jpeg = Vec::new();
+            if jpeg_encoder::Encoder::new(&mut jpeg, 92)
+                .encode(&out, w as u16, h as u16, jpeg_encoder::ColorType::Rgb)
+                .is_ok()
+            {
+                *preview.blocking_lock() = Some(jpeg);
+            }
+            tracing::info!("post-stack done (sigma-clip, {} frames)", xforms.len());
+            return;
+        }
+
         let mut stk: Option<stacker::Stacker> = None;
         let mut dims: Option<(usize, usize)> = None;
         for (_, path) in &files {
